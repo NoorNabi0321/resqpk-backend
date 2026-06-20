@@ -15,12 +15,13 @@ const app = express();
 // Security headers.
 app.use(helmet());
 
-// CORS — allow the React dashboard and local dev origins. More origins
-// (e.g. the production Render URL) are added in Module 1, Step G.
+// CORS — allow the React dashboard, local dev origins, and the production
+// Render URL. Any origin set via FRONTEND_URL is also allowed.
 const allowedOrigins = [
   config.frontendUrl,
-  'http://localhost:5173',
-  'http://localhost:3000',
+  'http://localhost:5173', // React dev
+  'http://localhost:3000', // local backend test
+  'https://resqpk-backend.onrender.com', // production (Render)
 ];
 app.use(
   cors({
