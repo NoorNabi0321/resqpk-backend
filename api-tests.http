@@ -157,3 +157,30 @@ Content-Type: application/json
   "callerPhone": "03781980656",
   "gatewaySecret": "your-secret-from-env"
 }
+
+###############################################
+# Module 6 — AI Report Generator
+###############################################
+
+### Generate AI Report (text only — easiest to test)
+POST http://localhost:3000/api/ai/report
+Authorization: Bearer PATIENT_TOKEN
+Content-Type: multipart/form-data; boundary=boundary
+
+--boundary
+Content-Disposition: form-data; name="case_id"
+
+CASE_ID_HERE
+--boundary
+Content-Disposition: form-data; name="text"
+
+Patient is a 50 year old male with severe chest pain and difficulty breathing. He is diabetic and takes insulin. No known drug allergies.
+--boundary
+Content-Disposition: form-data; name="language"
+
+en
+--boundary--
+
+### Get Report
+GET http://localhost:3000/api/ai/report/CASE_ID_HERE
+Authorization: Bearer PATIENT_TOKEN

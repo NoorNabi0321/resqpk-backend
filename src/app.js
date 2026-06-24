@@ -13,6 +13,7 @@ import realtimeRouter from './routes/realtime.js';
 import sosRouter from './routes/sos.js';
 import casesRouter from './routes/cases.js';
 import analyticsRouter from './routes/analytics.js';
+import aiRouter from './routes/ai.js';
 import errorHandler from './middleware/errorHandler.js';
 
 const app = express();
@@ -65,6 +66,7 @@ app.use('/api/realtime', realtimeRouter);
 app.use('/api/sos', sosRouter);
 app.use('/api/cases', casesRouter);
 app.use('/api/analytics', analyticsRouter);
+app.use('/api/ai', aiRouter);
 
 // Global error handler — must be registered last.
 app.use(errorHandler);
