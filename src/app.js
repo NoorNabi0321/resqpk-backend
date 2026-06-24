@@ -8,6 +8,11 @@ import rateLimit from 'express-rate-limit';
 
 import config from './config/env.js';
 import healthRouter from './routes/health.js';
+import authRouter from './routes/auth.js';
+import realtimeRouter from './routes/realtime.js';
+import sosRouter from './routes/sos.js';
+import casesRouter from './routes/cases.js';
+import analyticsRouter from './routes/analytics.js';
 import errorHandler from './middleware/errorHandler.js';
 
 const app = express();
@@ -55,6 +60,11 @@ app.use(limiter);
 
 // Routes.
 app.use('/health', healthRouter);
+app.use('/api/auth', authRouter);
+app.use('/api/realtime', realtimeRouter);
+app.use('/api/sos', sosRouter);
+app.use('/api/cases', casesRouter);
+app.use('/api/analytics', analyticsRouter);
 
 // Global error handler — must be registered last.
 app.use(errorHandler);

@@ -1,0 +1,159 @@
+### ResQPK API tests (VS Code REST Client / reference for Postman)
+### Replace TOKEN_HERE values with tokens returned by the login/register responses.
+
+@baseUrl = http://localhost:3000
+
+### Health Check
+GET {{baseUrl}}/health
+
+### Register Patient
+POST {{baseUrl}}/api/auth/patient/register
+Content-Type: application/json
+
+{
+  "full_name": "Ahmed Khan",
+  "phone": "03001234567",
+  "password": "Test1234!"
+}
+
+### Login Patient
+POST {{baseUrl}}/api/auth/patient/login
+Content-Type: application/json
+
+{
+  "phone": "03001234567",
+  "password": "Test1234!"
+}
+
+### Register Driver
+POST {{baseUrl}}/api/auth/driver/register
+Content-Type: application/json
+
+{
+  "full_name": "Usman Ali",
+  "phone": "03009876543",
+  "password": "Driver1234!",
+  "vehicle_number": "SBC-123",
+  "license_number": "HYD-DL-2024-001",
+  "organization": "Private"
+}
+
+### Login Driver
+POST {{baseUrl}}/api/auth/driver/login
+Content-Type: application/json
+
+{
+  "phone": "03009876543",
+  "password": "Driver1234!"
+}
+
+### Hospital Admin Login (created in Part C)
+POST {{baseUrl}}/api/auth/hospital/login
+Content-Type: application/json
+
+{
+  "email": "admin@civilhospital.resqpk.app",
+  "password": "HospAdmin2024!"
+}
+
+### Get My Profile (replace TOKEN with token from a login response)
+GET {{baseUrl}}/api/auth/me
+Authorization: Bearer TOKEN_HERE
+
+### Update Medical Profile (patient token required)
+PUT {{baseUrl}}/api/auth/medical-profile
+Authorization: Bearer TOKEN_HERE
+Content-Type: application/json
+
+{
+  "blood_group": "O+",
+  "chronic_conditions": ["Diabetes"],
+  "allergies": ["Penicillin"],
+  "emergency_contact_name": "Fatima Khan",
+  "emergency_contact_phone": "03331234567",
+  "emergency_contact_relation": "Wife"
+}
+
+### Refresh Token
+POST {{baseUrl}}/api/auth/refresh
+Authorization: Bearer TOKEN_HERE
+
+### Protected route without token (should return 401)
+GET {{baseUrl}}/api/auth/me
+
+### Wrong role: medical-profile with a driver token (should return 403)
+PUT {{baseUrl}}/api/auth/medical-profile
+Authorization: Bearer DRIVER_TOKEN_HERE
+Content-Type: application/json
+
+{ "blood_group": "A+" }
+
+###############################################################################
+# MODULE 4 — SOS + Dispatch
+###############################################################################
+
+### Trigger SOS (patient token) — returns fast, dispatch runs in background
+POST {{baseUrl}}/api/sos/trigger
+Authorization: Bearer PATIENT_TOKEN_HERE
+Content-Type: application/json
+
+{
+  "lat": 25.3792,
+  "lng": 68.3683,
+  "accuracy": 15,
+  "triggerMethod": "app_sos"
+}
+
+### Driver respond - Accept (driver token, use caseId from SOS response)
+POST {{baseUrl}}/api/cases/respond
+Authorization: Bearer DRIVER_TOKEN_HERE
+Content-Type: application/json
+
+{
+  "caseId": "CASE_ID_HERE",
+  "response": "accepted"
+}
+
+### Get case details (patient or assigned driver token)
+GET {{baseUrl}}/api/cases/CASE_ID_HERE
+Authorization: Bearer PATIENT_TOKEN_HERE
+
+### Update status - Driver arrived at patient
+PUT {{baseUrl}}/api/cases/status
+Authorization: Bearer DRIVER_TOKEN_HERE
+Content-Type: application/json
+
+{ "caseId": "CASE_ID_HERE", "status": "arrived" }
+
+### Update status - En route to hospital
+PUT {{baseUrl}}/api/cases/status
+Authorization: Bearer DRIVER_TOKEN_HERE
+Content-Type: application/json
+
+{ "caseId": "CASE_ID_HERE", "status": "en_route" }
+
+### Update status - Completed (driver freed)
+PUT {{baseUrl}}/api/cases/status
+Authorization: Bearer DRIVER_TOKEN_HERE
+Content-Type: application/json
+
+{ "caseId": "CASE_ID_HERE", "status": "completed" }
+
+### Family tracking (public — no auth)
+GET {{baseUrl}}/api/cases/track/SHARE_TOKEN_HERE
+
+### Cancel SOS (patient token)
+POST {{baseUrl}}/api/sos/cancel
+Authorization: Bearer PATIENT_TOKEN_HERE
+Content-Type: application/json
+
+{ "caseId": "CASE_ID_HERE", "reason": "false_alarm" }
+
+### Missed-call webhook (simulating the Android gateway — public)
+POST {{baseUrl}}/api/sos/missed-call-webhook
+Content-Type: application/json
+
+{
+  "callerPhone": "03781980656",
+  "gatewaySecret": "your-secret-from-env"
+}

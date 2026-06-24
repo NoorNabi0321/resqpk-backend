@@ -45,7 +45,7 @@ const config = {
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '7d',
 
   // Third-party integrations (wired up in later modules — optional for now)
-  googleMapsApiKey: process.env.GOOGLE_MAPS_API_KEY || '',
+  orsApiKey: process.env.ORS_API_KEY || '',
   openaiApiKey: process.env.OPENAI_API_KEY || '',
 
   // App URLs

@@ -1,0 +1,114 @@
+// HTTP controllers for authentication. Each handler validates input, calls the
+// service, and returns a consistent response envelope.
+import jwt from 'jsonwebtoken';
+import authService from '../services/auth.service.js';
+import config from '../config/env.js';
+import {
+  patientRegisterSchema,
+  driverRegisterSchema,
+  loginSchema,
+  hospitalLoginSchema,
+  medicalProfileSchema,
+  validate,
+} from '../validators/auth.validator.js';
+import { successResponse, errorResponse } from '../utils/response.js';
+
+export async function registerPatient(req, res) {
+  const { error, value } = validate(patientRegisterSchema, req.body);
+  if (error) return errorResponse(res, 'Validation failed', 400, error);
+  try {
+    const data = await authService.registerPatient(value);
+    return successResponse(res, data, 'Patient registered successfully', 201);
+  } catch (err) {
+    return errorResponse(res, err.message, 400);
+  }
+}
+
+export async function registerDriver(req, res) {
+  const { error, value } = validate(driverRegisterSchema, req.body);
+  if (error) return errorResponse(res, 'Validation failed', 400, error);
+  try {
+    const data = await authService.registerDriver(value);
+    return successResponse(res, data, 'Driver registered successfully. Pending admin verification.', 201);
+  } catch (err) {
+    return errorResponse(res, err.message, 400);
+  }
+}
+
+export async function loginPatient(req, res) {
+  const { error, value } = validate(loginSchema, req.body);
+  if (error) return errorResponse(res, 'Validation failed', 400, error);
+  try {
+    const data = await authService.loginPatient(value);
+    return successResponse(res, data, 'Login successful', 200);
+  } catch (err) {
+    return errorResponse(res, err.message, 400);
+  }
+}
+
+export async function loginDriver(req, res) {
+  const { error, value } = validate(loginSchema, req.body);
+  if (error) return errorResponse(res, 'Validation failed', 400, error);
+  try {
+    const data = await authService.loginDriver(value);
+    return successResponse(res, data, 'Login successful', 200);
+  } catch (err) {
+    return errorResponse(res, err.message, 400);
+  }
+}
+
+export async function loginHospitalAdmin(req, res) {
+  const { error, value } = validate(hospitalLoginSchema, req.body);
+  if (error) return errorResponse(res, 'Validation failed', 400, error);
+  try {
+    const data = await authService.loginHospitalAdmin(value);
+    return successResponse(res, data, 'Login successful', 200);
+  } catch (err) {
+    return errorResponse(res, err.message, 400);
+  }
+}
+
+export async function getMyProfile(req, res) {
+  try {
+    const data = await authService.getMyProfile(req.user.id);
+    return successResponse(res, data, 'Profile fetched', 200);
+  } catch (err) {
+    return errorResponse(res, err.message, 400);
+  }
+}
+
+export async function updateMedicalProfile(req, res) {
+  const { error, value } = validate(medicalProfileSchema, req.body);
+  if (error) return errorResponse(res, 'Validation failed', 400, error);
+  try {
+    const data = await authService.saveMedicalProfile(req.user.id, value);
+    return successResponse(res, data, 'Medical profile updated', 200);
+  } catch (err) {
+    return errorResponse(res, err.message, 400);
+  }
+}
+
+// Issues a fresh token with the same payload (the current token was already
+// verified by the authenticate middleware, so req.user is trusted here).
+export async function refreshToken(req, res) {
+  try {
+    const payload = { ...req.user };
+    delete payload.iat;
+    delete payload.exp;
+    const token = jwt.sign(payload, config.jwtSecret, { expiresIn: config.jwtExpiresIn });
+    return successResponse(res, { token }, 'Token refreshed', 200);
+  } catch (err) {
+    return errorResponse(res, err.message, 400);
+  }
+}
+
+export default {
+  registerPatient,
+  registerDriver,
+  loginPatient,
+  loginDriver,
+  loginHospitalAdmin,
+  getMyProfile,
+  updateMedicalProfile,
+  refreshToken,
+};
