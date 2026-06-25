@@ -8,6 +8,7 @@
     "start": "node server.js",
     "dev": "nodemon server.js",
     "evaluate": "node evaluation/run-evaluation.js",
+    "test:offline": "node evaluation/test-offline-sos.mjs",
     "test": "echo \"No tests yet\""
   },
   "keywords": [

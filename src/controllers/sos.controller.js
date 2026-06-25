@@ -49,3 +49,15 @@ export async function handleMissedCallWebhook(req, res) {
     return successResponse(res, { success: false, reason: 'error' }, 'Received', 200);
   }
 }
+
+// POST /api/sos/sms-webhook (public — SMS forwarder app).
+// Body: { callerPhone, messageBody, gatewaySecret }. Always 200 so the app never
+// spam-retries; failures are logged internally.
+export async function smsWebhookController(req, res) {
+  try {
+    const data = await caseService.handleSMSWebhook(req.body || {});
+    return successResponse(res, data, 'Received', 200);
+  } catch {
+    return successResponse(res, { success: false, reason: 'error' }, 'Received', 200);
+  }
+}

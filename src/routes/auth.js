@@ -8,6 +8,7 @@ import {
   loginHospitalAdmin,
   getMyProfile,
   updateMedicalProfile,
+  updateLocation,
   refreshToken,
 } from '../controllers/auth.controller.js';
 import { authenticate, requireRole } from '../middleware/auth.js';
@@ -24,6 +25,7 @@ router.post('/hospital/login', loginHospitalAdmin);
 // Protected routes (require a valid JWT).
 router.get('/me', authenticate, getMyProfile);
 router.put('/medical-profile', authenticate, requireRole('patient'), updateMedicalProfile);
+router.put('/location', authenticate, updateLocation);
 router.post('/refresh', authenticate, refreshToken);
 
 export default router;

@@ -184,3 +184,59 @@ en
 ### Get Report
 GET http://localhost:3000/api/ai/report/CASE_ID_HERE
 Authorization: Bearer PATIENT_TOKEN
+
+###############################################
+# Module 7 — Offline SOS (SMS gateway)
+# Secret must match SMS_GATEWAY_SECRET in .env
+###############################################
+
+### SMS webhook — wrong secret (200, reason unauthorized)
+POST http://localhost:3000/api/sos/sms-webhook
+Content-Type: application/json
+
+{
+  "callerPhone": "03001234567",
+  "messageBody": "SOS",
+  "gatewaySecret": "wrong-secret"
+}
+
+### SMS webhook — not a trigger keyword (200, reason not_a_trigger)
+POST http://localhost:3000/api/sos/sms-webhook
+Content-Type: application/json
+
+{
+  "callerPhone": "03001234567",
+  "messageBody": "hello how are you",
+  "gatewaySecret": "resqpk-gateway-secret-2026-hyderabad"
+}
+
+### SMS webhook — unregistered number (200, reason not_registered)
+POST http://localhost:3000/api/sos/sms-webhook
+Content-Type: application/json
+
+{
+  "callerPhone": "03009999999",
+  "messageBody": "SOS",
+  "gatewaySecret": "resqpk-gateway-secret-2026-hyderabad"
+}
+
+### SMS webhook — valid SOS (registered patient WITH last_known_location)
+POST http://localhost:3000/api/sos/sms-webhook
+Content-Type: application/json
+
+{
+  "callerPhone": "03781980656",
+  "messageBody": "SOS chest pain",
+  "gatewaySecret": "resqpk-gateway-secret-2026-hyderabad"
+}
+
+### Update last-known location (patient token)
+PUT http://localhost:3000/api/auth/location
+Authorization: Bearer PATIENT_TOKEN
+Content-Type: application/json
+
+{
+  "lat": 25.3792,
+  "lng": 68.3683,
+  "accuracy": 12.5
+}

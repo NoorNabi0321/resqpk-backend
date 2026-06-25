@@ -3,6 +3,7 @@
 import jwt from 'jsonwebtoken';
 import authService from '../services/auth.service.js';
 import config from '../config/env.js';
+import { supabaseAdmin } from '../config/supabase.js';
 import {
   patientRegisterSchema,
   driverRegisterSchema,
@@ -88,6 +89,37 @@ export async function updateMedicalProfile(req, res) {
   }
 }
 
+// PUT /api/auth/location — keeps the caller's last-known GPS fresh so offline
+// SOS (SMS trigger) can dispatch from it. Called by the app every few minutes.
+export async function updateLocation(req, res) {
+  const lat = Number(req.body?.lat);
+  const lng = Number(req.body?.lng);
+
+  if (!Number.isFinite(lat) || lat < -90 || lat > 90) {
+    return errorResponse(res, 'lat must be a number between -90 and 90', 400);
+  }
+  if (!Number.isFinite(lng) || lng < -180 || lng > 180) {
+    return errorResponse(res, 'lng must be a number between -180 and 180', 400);
+  }
+
+  try {
+    const updatedAt = new Date().toISOString();
+    const { error } = await supabaseAdmin
+      .from('users')
+      .update({
+        last_known_lat: lat,
+        last_known_lng: lng,
+        last_location_updated_at: updatedAt,
+      })
+      .eq('id', req.user.id);
+    if (error) throw new Error(error.message);
+
+    return successResponse(res, { location: { lat, lng, updatedAt } }, 'Location updated', 200);
+  } catch (err) {
+    return errorResponse(res, err.message, 400);
+  }
+}
+
 // Issues a fresh token with the same payload (the current token was already
 // verified by the authenticate middleware, so req.user is trusted here).
 export async function refreshToken(req, res) {
@@ -110,5 +142,6 @@ export default {
   loginHospitalAdmin,
   getMyProfile,
   updateMedicalProfile,
+  updateLocation,
   refreshToken,
 };
