@@ -240,3 +240,31 @@ Content-Type: application/json
   "lng": 68.3683,
   "accuracy": 12.5
 }
+
+###############################################
+# Module 8 — First Aid Library
+###############################################
+
+### Get all first aid guides (public)
+GET http://localhost:3000/api/first-aid
+
+### Get Urdu guides
+GET http://localhost:3000/api/first-aid?lang=ur
+
+### Get featured guides only
+GET http://localhost:3000/api/first-aid?featured=true
+
+### Get single guide by slug
+GET http://localhost:3000/api/first-aid/cpr-guide
+
+### Send weekly notification (dev: no auth; prod: super_admin)
+POST http://localhost:3000/api/first-aid/send-weekly-notification
+
+### Register / refresh FCM token (Module 8 B2)
+PUT http://localhost:3000/api/auth/fcm-token
+Authorization: Bearer PATIENT_TOKEN
+Content-Type: application/json
+
+{
+  "fcmToken": "fcm-token-from-firebase-here"
+}

@@ -120,6 +120,25 @@ export async function updateLocation(req, res) {
   }
 }
 
+// PUT /api/auth/fcm-token — stores the device's FCM token for push delivery.
+// Called on app start and whenever Firebase rotates the token.
+export async function updateFCMToken(req, res) {
+  const { fcmToken } = req.body || {};
+  if (!fcmToken || typeof fcmToken !== 'string') {
+    return errorResponse(res, 'fcmToken is required', 400);
+  }
+  try {
+    const { error } = await supabaseAdmin
+      .from('users')
+      .update({ fcm_token: fcmToken })
+      .eq('id', req.user.id);
+    if (error) throw new Error(error.message);
+    return successResponse(res, { success: true }, 'FCM token updated', 200);
+  } catch (err) {
+    return errorResponse(res, err.message, 400);
+  }
+}
+
 // Issues a fresh token with the same payload (the current token was already
 // verified by the authenticate middleware, so req.user is trusted here).
 export async function refreshToken(req, res) {
@@ -143,5 +162,6 @@ export default {
   getMyProfile,
   updateMedicalProfile,
   updateLocation,
+  updateFCMToken,
   refreshToken,
 };

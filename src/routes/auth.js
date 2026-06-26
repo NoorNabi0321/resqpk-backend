@@ -9,6 +9,7 @@ import {
   getMyProfile,
   updateMedicalProfile,
   updateLocation,
+  updateFCMToken,
   refreshToken,
 } from '../controllers/auth.controller.js';
 import { authenticate, requireRole } from '../middleware/auth.js';
@@ -26,6 +27,7 @@ router.post('/hospital/login', loginHospitalAdmin);
 router.get('/me', authenticate, getMyProfile);
 router.put('/medical-profile', authenticate, requireRole('patient'), updateMedicalProfile);
 router.put('/location', authenticate, updateLocation);
+router.put('/fcm-token', authenticate, updateFCMToken);
 router.post('/refresh', authenticate, refreshToken);
 
 export default router;
