@@ -19,6 +19,10 @@ import errorHandler from './middleware/errorHandler.js';
 
 const app = express();
 
+// Render (and most PaaS) sit behind a reverse proxy. Trust the first proxy hop
+// so req.ip and express-rate-limit's X-Forwarded-For handling work correctly.
+app.set('trust proxy', 1);
+
 // Security headers.
 app.use(helmet());
 
