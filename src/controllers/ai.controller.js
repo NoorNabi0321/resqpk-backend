@@ -2,6 +2,7 @@
 import multer from 'multer';
 
 import aiPipeline from '../services/ai/ai.pipeline.js';
+import pdfService from '../services/pdf.service.js';
 import { supabaseAdmin } from '../config/supabase.js';
 import { successResponse, errorResponse } from '../utils/response.js';
 
@@ -86,4 +87,37 @@ export async function getReport(req, res) {
   return successResponse(res, report, 'AI report', 200);
 }
 
-export default { uploadMiddleware, generateReport, getReport };
+// GET /api/ai/report/:caseId/pdf — fresh signed URL for the stored report PDF.
+// Stored URLs expire after 6 hours, so a hospital reopening an old case needs
+// a newly minted one rather than the link saved at generation time.
+export async function getReportPdf(req, res) {
+  const { caseId } = req.params;
+  const { data: report } = await supabaseAdmin
+    .from('ai_reports')
+    .select('pdf_storage_path, emergency_cases!inner(patient_id, hospital_id)')
+    .eq('case_id', caseId)
+    .maybeSingle();
+
+  if (!report) return errorResponse(res, 'Report not found', 404);
+
+  const ec = report.emergency_cases;
+  const isOwnerPatient = req.user.role === 'patient' && ec.patient_id === req.user.id;
+  const isHospitalAdmin =
+    req.user.role === 'hospital_admin' && ec.hospital_id === req.user.hospital_id;
+  if (!isOwnerPatient && !isHospitalAdmin) {
+    return errorResponse(res, 'Not authorized to view this report', 403);
+  }
+
+  if (!report.pdf_storage_path) {
+    return errorResponse(res, 'No PDF available for this report', 404);
+  }
+
+  try {
+    const pdfUrl = await pdfService.getSignedPdfUrl(report.pdf_storage_path);
+    return successResponse(res, { pdfUrl }, 'Report PDF URL', 200);
+  } catch (err) {
+    return errorResponse(res, `Could not create PDF link: ${err.message}`, 500);
+  }
+}
+
+export default { uploadMiddleware, generateReport, getReport, getReportPdf };

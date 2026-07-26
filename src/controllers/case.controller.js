@@ -37,11 +37,53 @@ export async function updateStatus(req, res) {
 // GET /api/cases/:id (patient or assigned driver)
 export async function getCaseDetails(req, res) {
   try {
-    const data = await caseService.getCaseDetails(req.params.id, req.user.id);
+    const data = await caseService.getCaseDetails(req.params.id, req.user);
     return successResponse(res, data, 'Case details', 200);
   } catch (err) {
     const code = err.message.includes('authorized') ? 403 : 404;
     return errorResponse(res, err.message, code);
+  }
+}
+
+// GET /api/cases/:id/route (patient or assigned driver — road geometry for the current leg)
+export async function getCaseRoute(req, res) {
+  try {
+    const data = await caseService.getCaseRoute(req.params.id, req.user.id);
+    return successResponse(res, data, 'Case route', 200);
+  } catch (err) {
+    const code = err.message.includes('authorized') ? 403 : 404;
+    return errorResponse(res, err.message, code);
+  }
+}
+
+// GET /api/hospitals/nearby?lat=&lng= (any authenticated user)
+export async function nearbyHospitals(req, res) {
+  const lat = Number(req.query.lat);
+  const lng = Number(req.query.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return errorResponse(res, 'lat and lng query params are required', 400);
+  }
+  try {
+    const data = await caseService.listNearbyHospitals({ lat, lng });
+    return successResponse(res, data, 'Nearby hospitals', 200);
+  } catch (err) {
+    return errorResponse(res, err.message, 400);
+  }
+}
+
+// PUT /api/cases/:id/hospital (patient — change destination hospital)
+export async function changeHospital(req, res) {
+  const { hospitalId } = req.body || {};
+  if (!hospitalId) return errorResponse(res, 'hospitalId is required', 400);
+  try {
+    const data = await caseService.changeCaseHospital({
+      caseId: req.params.id,
+      patientId: req.user.id,
+      hospitalId,
+    });
+    return successResponse(res, data, 'Hospital updated', 200);
+  } catch (err) {
+    return errorResponse(res, err.message, 400);
   }
 }
 

@@ -29,6 +29,7 @@ export const EVENTS = Object.freeze({
     CASE_COMPLETED: 'emergency:case_completed',
     CASE_CANCELLED: 'emergency:case_cancelled',
     NO_DRIVER_FOUND: 'emergency:no_driver_found',
+    HOSPITAL_CHANGED: 'emergency:hospital_changed',
   }),
   ETA: Object.freeze({
     ETA_UPDATE: 'eta:update',
@@ -40,6 +41,12 @@ export const EVENTS = Object.freeze({
     HOSPITAL_CASE_UPDATE: 'hospital:case_update',
     HOSPITAL_AMBULANCE_UPDATE: 'hospital:ambulance_update',
     BED_STATUS_CHANGED: 'hospital:bed_status_changed',
+  }),
+  // v2 — hospital decisions on an incoming case.
+  DECISION: Object.freeze({
+    CASE_ACCEPTED: 'case:accepted',
+    CASE_REDIRECTED: 'case:redirected',
+    QUICK_MESSAGE: 'case:quick_message',
   }),
   TRACKING: Object.freeze({
     SHARE_LOCATION_REQUEST: 'tracking:share_location_request',

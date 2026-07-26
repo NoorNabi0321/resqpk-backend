@@ -79,6 +79,12 @@ export async function generateReport(inputs) {
   reportData.consciousness_state = reportData.consciousness_state || 'unknown';
   if (!Array.isArray(reportData.key_observations)) reportData.key_observations = [];
 
+  // resources_needed drives the hospital's accept/redirect decision, so it must
+  // never be empty — 'Emergency Ward' is the safe universal fallback.
+  if (!Array.isArray(reportData.resources_needed) || reportData.resources_needed.length === 0) {
+    reportData.resources_needed = ['Emergency Ward'];
+  }
+
   return {
     ...reportData,
     generationTimeMs: response._generationTimeMs,

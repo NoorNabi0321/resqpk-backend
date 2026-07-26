@@ -8,6 +8,7 @@ import logger from '../../middleware/logger.js';
 
 import whisperService from './whisper.service.js';
 import gptService from './gpt.service.js';
+import pdfService from '../pdf.service.js';
 import * as fileUtils from '../../utils/file.utils.js';
 
 export async function processAIReport(caseId, patientId, inputs) {
@@ -147,6 +148,9 @@ export async function processAIReport(caseId, patientId, inputs) {
           key_observations: reportData.key_observations,
           first_aid_suggestion: reportData.first_aid_suggestion,
           possible_conditions: reportData.possible_conditions,
+          // Saved here rather than in the PDF step below: the resource matcher
+          // reads this column, so it must persist even if PDF generation fails.
+          resources_needed: reportData.resources_needed,
           raw_gpt_response: reportData.rawGptResponse,
           medical_profile_snapshot: medicalProfile || null,
           generation_status: 'completed',
@@ -159,7 +163,10 @@ export async function processAIReport(caseId, patientId, inputs) {
       .single();
     if (saveError) throw new Error(`Saving report failed: ${saveError.message}`);
 
-    const { data: caseRow } = await supabaseAdmin
+    // Plain column list: an embedded join here (patient:users(...)) makes the
+    // whole update+select return null, which silently emptied the PDF header
+    // and skipped the hospital broadcast below.
+    const { data: caseRow, error: caseUpdateError } = await supabaseAdmin
       .from('emergency_cases')
       .update({
         has_ai_report: true,
@@ -167,8 +174,49 @@ export async function processAIReport(caseId, patientId, inputs) {
         emergency_type: reportData.emergency_type,
       })
       .eq('id', caseId)
-      .select('hospital_id')
+      .select('id, case_number, patient_address, sos_triggered_at, hospital_id')
       .single();
+    if (caseUpdateError) {
+      logger.error(`Case update after report failed for ${caseId}: ${caseUpdateError.message}`);
+    }
+
+    // The patient's name for the PDF header, fetched separately.
+    const { data: patientUser } = await supabaseAdmin
+      .from('users')
+      .select('full_name')
+      .eq('id', patientId)
+      .maybeSingle();
+
+    // STEP 8b — generate the PDF report and attach it to the saved row.
+    // Best-effort: the JSON report is what the system runs on, the PDF is an
+    // enhancement for the hospital, so a failure here must never fail the case.
+    let pdfResult = null;
+    try {
+      const caseWithPatient = {
+        id: caseId,
+        case_number: caseRow?.case_number,
+        patient_name: patientUser?.full_name,
+        patient_address: caseRow?.patient_address,
+        sos_triggered_at: caseRow?.sos_triggered_at,
+      };
+      pdfResult = await pdfService.generateReportPDF(
+        { ...reportData, transcribed_text: transcribedText, input_language: detectedLanguage },
+        caseWithPatient,
+        medicalProfile,
+      );
+
+      const { error: pdfSaveError } = await supabaseAdmin
+        .from('ai_reports')
+        .update({
+          pdf_url: pdfResult.signedUrl,
+          pdf_storage_path: pdfResult.storagePath,
+        })
+        .eq('case_id', caseId);
+      if (pdfSaveError) throw new Error(pdfSaveError.message);
+    } catch (pdfError) {
+      pdfResult = null;
+      logger.error(`PDF generation failed for case ${caseId}: ${pdfError.message}`);
+    }
 
     // STEP 9 — broadcast.
     const hospitalPayload = {
@@ -187,6 +235,8 @@ export async function processAIReport(caseId, patientId, inputs) {
         transcribedText,
         inputLanguage: detectedLanguage,
       },
+      pdfUrl: pdfResult?.signedUrl || null,
+      resourcesNeeded: reportData.resources_needed || [],
       medicalProfile: medicalProfile
         ? {
             bloodGroup: medicalProfile.blood_group,
@@ -217,6 +267,8 @@ export async function processAIReport(caseId, patientId, inputs) {
       firstAidSuggestion: reportData.first_aid_suggestion,
       possibleConditions: reportData.possible_conditions,
       hospitalPreparation: reportData.hospital_preparation,
+      resourcesNeeded: reportData.resources_needed,
+      pdfUrl: pdfResult?.signedUrl || null,
       generationTimeMs: totalTimeMs,
       detectedLanguage,
       transcribedText,

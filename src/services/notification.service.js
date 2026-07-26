@@ -194,8 +194,36 @@ export async function sendWeeklyEngagementNotifications() {
   return { sent, failed, recipients: tokens.length, tip: tip.title };
 }
 
+// v2 — generic push to a driver for hospital decisions and quick messages.
+// Never throws: notifications are an enhancement, never a blocker.
+export async function sendDriverDecisionNotification(driverFcmToken, { title, body, data = {} }) {
+  if (!initFirebase()) return { success: false, reason: 'not_configured' };
+  if (!driverFcmToken) return { success: false, reason: 'no_token' };
+
+  const stringData = Object.fromEntries(
+    Object.entries(data).map(([k, v]) => [k, String(v ?? '')]),
+  );
+
+  try {
+    await admin.messaging().send({
+      token: driverFcmToken,
+      notification: { title, body },
+      data: stringData,
+      android: {
+        priority: 'high',
+        notification: { channelId: 'emergency_dispatch', priority: 'high' },
+      },
+    });
+    return { success: true };
+  } catch (err) {
+    logger.error(`FCM decision notify failed: ${err.message}`);
+    return { success: false, error: err.message };
+  }
+}
+
 export default {
   sendDriverDispatchNotification,
+  sendDriverDecisionNotification,
   sendPatientConfirmationNotification,
   sendHospitalNotification,
   sendFamilyTrackingNotification,

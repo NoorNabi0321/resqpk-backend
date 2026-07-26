@@ -4,6 +4,8 @@ import {
   driverRespond,
   updateStatus,
   getCaseDetails,
+  getCaseRoute,
+  changeHospital,
   getShareTracking,
   listCases,
   updateBeds,
@@ -23,6 +25,10 @@ router.post('/respond', authenticate, requireRole('driver'), driverRespond);
 router.put('/status', authenticate, requireRole('driver'), updateStatus);
 
 // Patient or assigned driver.
+router.get('/:id/route', authenticate, getCaseRoute);
 router.get('/:id', authenticate, getCaseDetails);
+
+// Patient only — change the destination hospital mid-case.
+router.put('/:id/hospital', authenticate, requireRole('patient'), changeHospital);
 
 export default router;

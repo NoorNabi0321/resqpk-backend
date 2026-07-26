@@ -46,6 +46,17 @@ export async function uploadToSupabaseStorage(fileBuffer, originalFilename, mime
   return { path: uniqueName, signedUrl: urlData.signedUrl };
 }
 
+// Mints a fresh signed URL for a file already in storage. Used when a stored
+// asset (e.g. an AI report PDF) is opened after its original URL expired.
+export async function createSignedUrl(storagePath, expiresInSeconds = 60 * 60 * 6) {
+  if (!storagePath) throw new Error('storagePath is required');
+  const { data, error } = await supabaseAdmin.storage
+    .from(BUCKET)
+    .createSignedUrl(storagePath, expiresInSeconds);
+  if (error) throw new Error(`Signed URL failed: ${error.message}`);
+  return data.signedUrl;
+}
+
 // Removes a file from storage (best-effort cleanup).
 export async function deleteFromStorage(filePath) {
   if (!filePath) return;

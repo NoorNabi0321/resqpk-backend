@@ -330,27 +330,192 @@ export async function handleSMSWebhook({ callerPhone, messageBody, gatewaySecret
   };
 }
 
-// 6. Full case detail (patient or assigned driver only).
-export async function getCaseDetails(caseId, requestingUserId) {
+// 6. Full case detail — the patient, the assigned driver, or the hospital the
+// case is currently routed to (v2: the hospital dashboard opens this page).
+export async function getCaseDetails(caseId, requestingUser) {
   const { data: emergencyCase } = await supabaseAdmin
     .from('emergency_cases')
     .select(
       `*,
-       patient:users(full_name, phone, medical_profiles(blood_group, chronic_conditions, allergies)),
+       patient:patient_id(full_name, phone, medical_profiles(blood_group, gender, date_of_birth, chronic_conditions, allergies)),
        driver:drivers(user_id, vehicle_number, current_lat, current_lng, heading, users(full_name, phone)),
-       hospital:hospitals(name, lat, lng, emergency_phone),
-       ai_report:ai_reports(urgency_level, emergency_type, consciousness_state, key_observations, first_aid_suggestion)`,
+       hospital:hospital_id(name, lat, lng, emergency_phone),
+       ai_report:ai_reports(urgency_level, emergency_type, consciousness_state, key_observations, first_aid_suggestion, resources_needed, pdf_url)`,
     )
     .eq('id', caseId)
     .maybeSingle();
 
   if (!emergencyCase) throw new Error('Case not found');
 
+  // Accept a plain id for older callers as well as the full req.user object.
+  const user = typeof requestingUser === 'string' ? { id: requestingUser } : requestingUser || {};
+
+  const isPatient = emergencyCase.patient_id === user.id;
+  const isDriver = emergencyCase.driver?.user_id === user.id;
+  const isHospitalAdmin =
+    user.role === 'hospital_admin' &&
+    !!user.hospital_id &&
+    emergencyCase.hospital_id === user.hospital_id;
+
+  if (!isPatient && !isDriver && !isHospitalAdmin) {
+    throw new Error('Not authorized to view this case');
+  }
+
+  return emergencyCase;
+}
+
+// 6b. Road-following route for the case's current leg (patient or driver).
+// driver_assigned  → driver's live position → patient (pickup leg)
+// arrived          → patient → hospital (preview of the drop-off leg)
+// en_route         → driver's live position → hospital (drop-off leg)
+export async function getCaseRoute(caseId, requestingUserId) {
+  const { data: emergencyCase } = await supabaseAdmin
+    .from('emergency_cases')
+    .select(
+      `id, status, patient_id, patient_lat, patient_lng,
+       driver:drivers(user_id, current_lat, current_lng),
+       hospital:hospital_id(id, name, lat, lng)`,
+    )
+    .eq('id', caseId)
+    .maybeSingle();
+  if (!emergencyCase) throw new Error('Case not found');
+
   const isPatient = emergencyCase.patient_id === requestingUserId;
   const isDriver = emergencyCase.driver?.user_id === requestingUserId;
   if (!isPatient && !isDriver) throw new Error('Not authorized to view this case');
 
-  return emergencyCase;
+  const patient = { lat: Number(emergencyCase.patient_lat), lng: Number(emergencyCase.patient_lng) };
+  const driver =
+    emergencyCase.driver?.current_lat != null
+      ? { lat: Number(emergencyCase.driver.current_lat), lng: Number(emergencyCase.driver.current_lng) }
+      : null;
+  const hospital =
+    emergencyCase.hospital?.lat != null
+      ? { lat: Number(emergencyCase.hospital.lat), lng: Number(emergencyCase.hospital.lng) }
+      : null;
+
+  let leg;
+  let origin;
+  let destination;
+  switch (emergencyCase.status) {
+    case 'driver_assigned':
+      leg = 'pickup';
+      origin = driver;
+      destination = patient;
+      break;
+    case 'arrived':
+      leg = 'dropoff';
+      origin = patient;
+      destination = hospital;
+      break;
+    case 'en_route':
+      leg = 'dropoff';
+      origin = driver || patient;
+      destination = hospital;
+      break;
+    default:
+      return { leg: null, coordinates: [] };
+  }
+  if (!origin || !destination) return { leg, coordinates: [] };
+
+  const { routes } = await mapsService.getDirectionsRoute(
+    origin.lat,
+    origin.lng,
+    destination.lat,
+    destination.lng,
+  );
+  const route = routes[0];
+  return {
+    leg,
+    origin,
+    destination,
+    coordinates: route?.coordinates || [],
+    durationSeconds: route?.durationSeconds ?? null,
+    distanceMeters: route?.distanceMeters ?? null,
+  };
+}
+
+// 6c. Emergency-capable hospitals nearest to a point (for "change hospital").
+export async function listNearbyHospitals({ lat, lng }) {
+  const { data: hospitals, error } = await supabaseAdmin
+    .from('hospitals')
+    .select('id, name, short_name, address, lat, lng, emergency_phone, has_emergency_ward, is_active')
+    .eq('is_active', true)
+    .eq('has_emergency_ward', true);
+  if (error) throw new Error(error.message);
+
+  return (hospitals || [])
+    .filter((h) => h.lat != null && h.lng != null)
+    .map((h) => {
+      const distanceMeters = Math.round(
+        mapsService.haversineDistance(Number(lat), Number(lng), Number(h.lat), Number(h.lng)),
+      );
+      return { ...h, distanceMeters, distanceText: `${(distanceMeters / 1000).toFixed(1)} km` };
+    })
+    .sort((a, b) => a.distanceMeters - b.distanceMeters);
+}
+
+// 6d. Patient changes the destination hospital while the case is active.
+export async function changeCaseHospital({ caseId, patientId, hospitalId }) {
+  const { data: emergencyCase } = await supabaseAdmin
+    .from('emergency_cases')
+    .select('id, status, patient_id, driver_id, hospital_id, case_number')
+    .eq('id', caseId)
+    .maybeSingle();
+  if (!emergencyCase) throw new Error('Case not found');
+  if (emergencyCase.patient_id !== patientId) throw new Error('Not your case');
+
+  const changeable = ['pending', 'searching', 'driver_assigned', 'arrived', 'en_route'];
+  if (!changeable.includes(emergencyCase.status)) {
+    throw new Error('Hospital can no longer be changed for this case');
+  }
+
+  const { data: hospital } = await supabaseAdmin
+    .from('hospitals')
+    .select('id, name, lat, lng, is_active, has_emergency_ward')
+    .eq('id', hospitalId)
+    .maybeSingle();
+  if (!hospital || !hospital.is_active) throw new Error('Hospital not found');
+  if (!hospital.has_emergency_ward) throw new Error('Hospital has no emergency ward');
+
+  const { error } = await supabaseAdmin
+    .from('emergency_cases')
+    .update({ hospital_id: hospitalId })
+    .eq('id', caseId);
+  if (error) throw new Error(error.message);
+
+  // Notify everyone tracking this case (patient app + driver app), the hospital
+  // that lost the case, and the hospital that gained it.
+  const io = getIO();
+  const payload = {
+    caseId,
+    hospitalId: hospital.id,
+    hospitalName: hospital.name,
+    hospitalLat: Number(hospital.lat),
+    hospitalLng: Number(hospital.lng),
+  };
+  io?.to(ROOMS.caseRoom(caseId)).emit(EVENTS.EMERGENCY.HOSPITAL_CHANGED, payload);
+  if (emergencyCase.driver_id) {
+    io?.to(ROOMS.driverRoom(emergencyCase.driver_id)).emit(
+      EVENTS.EMERGENCY.HOSPITAL_CHANGED,
+      payload,
+    );
+  }
+  if (emergencyCase.hospital_id && emergencyCase.hospital_id !== hospitalId) {
+    io?.to(ROOMS.hospitalRoom(emergencyCase.hospital_id)).emit(EVENTS.HOSPITAL.HOSPITAL_CASE_UPDATE, {
+      caseId,
+      type: 'hospital_changed',
+      transferredTo: hospital.name,
+    });
+  }
+  io?.to(ROOMS.hospitalRoom(hospitalId)).emit(EVENTS.HOSPITAL.HOSPITAL_NEW_CASE, {
+    caseId,
+    caseNumber: emergencyCase.case_number,
+    type: 'hospital_changed',
+  });
+
+  logger.info(`Case ${emergencyCase.case_number} hospital changed to ${hospital.name}`);
+  return { success: true, hospital: payload };
 }
 
 // 7. Public family tracking (no auth — by share token).
@@ -360,7 +525,7 @@ export async function getShareTrackingData(shareToken) {
     .select(
       `status, patient_lat, patient_lng, estimated_driver_arrival_seconds, share_token_expires_at,
        driver:drivers(current_lat, current_lng, heading),
-       hospital:hospitals(name, lat, lng)`,
+       hospital:hospital_id(name, lat, lng)`,
     )
     .eq('share_token', shareToken)
     .maybeSingle();
@@ -406,7 +571,7 @@ async function listHospitalCases({ hospitalId, date, status = 'all', limit = 20,
     .from('emergency_cases')
     .select(
       `*,
-       patient:users(full_name, phone, medical_profiles(blood_group, gender, date_of_birth, chronic_conditions, allergies)),
+       patient:patient_id(full_name, phone, medical_profiles(blood_group, gender, date_of_birth, chronic_conditions, allergies)),
        driver:drivers(vehicle_number, current_lat, current_lng, users(full_name, phone)),
        ai_report:ai_reports(urgency_level, emergency_type, consciousness_state, key_observations, first_aid_suggestion)`,
       { count: 'exact' },
@@ -486,6 +651,9 @@ export default {
   handleMissedCallSOS,
   handleSMSWebhook,
   getCaseDetails,
+  getCaseRoute,
+  listNearbyHospitals,
+  changeCaseHospital,
   getShareTrackingData,
   listHospitalCases,
   updateHospitalBeds,

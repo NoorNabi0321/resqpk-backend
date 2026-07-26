@@ -1,5 +1,6 @@
 // Authentication business logic. All database access uses supabaseAdmin
 // (service role, bypasses RLS). Passwords are managed entirely by Supabase Auth.
+import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import { supabaseClient, supabaseAdmin } from '../config/supabase.js';
 import config from '../config/env.js';
@@ -13,6 +14,29 @@ function signToken(payload) {
 // Digits-only phone for placeholder auth emails (e.g. 923001234567@resqpk.app).
 function phoneLocalPart(phone) {
   return String(phone).replace(/\D/g, '');
+}
+
+// users.phone is UNIQUE NOT NULL, but hospital and camp admins sign in by
+// email and may have no personal number. Use the supplied one when it is free,
+// otherwise allocate a clearly non-dialable placeholder.
+async function allocateAdminPhone(preferred) {
+  const isTaken = async (value) => {
+    const { data } = await supabaseAdmin
+      .from('users')
+      .select('id')
+      .eq('phone', value)
+      .maybeSingle();
+    return !!data;
+  };
+
+  if (preferred && !(await isTaken(preferred))) return preferred;
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const candidate = `admin-${crypto.randomBytes(4).toString('hex')}`; // 14 chars
+    // eslint-disable-next-line no-await-in-loop
+    if (!(await isTaken(candidate))) return candidate;
+  }
+  throw new Error('Could not allocate a unique admin phone');
 }
 
 // Creates the Supabase Auth user (skipping email confirmation for the FYP).
@@ -299,14 +323,15 @@ export async function saveMedicalProfile(userId, profileData) {
 
 // --- admin (internal, not exposed to the public API) -----------------------
 
-export async function createHospitalAdmin({ full_name, email, password, hospital_id }) {
+export async function createHospitalAdmin({ full_name, email, password, hospital_id, phone }) {
+  const adminPhone = await allocateAdminPhone(phone);
   const authUser = await createAuthUser(email, password);
 
   try {
     const { data: user, error: userError } = await supabaseAdmin
       .from('users')
-      .insert({ auth_id: authUser.id, full_name, email, role: 'hospital_admin' })
-      .select('id, full_name, email, role, auth_id')
+      .insert({ auth_id: authUser.id, full_name, email, phone: adminPhone, role: 'hospital_admin' })
+      .select('id, full_name, email, phone, role, auth_id')
       .single();
     if (userError) throw new Error(userError.message);
 

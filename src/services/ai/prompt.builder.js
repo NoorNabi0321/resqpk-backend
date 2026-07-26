@@ -18,6 +18,8 @@ CRITICAL RULES:
 5. Always respond in English regardless of input language
 6. Pakistani context: common conditions include diabetes, hypertension, cardiac issues
 7. Respect patient privacy — use initials or "the patient" in descriptions
+8. resources_needed must use ONLY terms from the provided standard list —
+   never invent equipment names
 
 URGENCY CLASSIFICATION GUIDE:
 - Critical: unconscious, not breathing, cardiac arrest, major trauma, stroke signs,
@@ -102,6 +104,14 @@ Respond with ONLY this JSON object (no other text):
   "possible_conditions": ["string", ...],
   "first_aid_suggestion": "string",
   "hospital_preparation": "string",
+  "resources_needed": ["string", ...],
+  // Hospital resources likely needed to treat this patient.
+  // Use standard terms from this list ONLY (pick all that apply):
+  // ECG, Ventilator, X-Ray, CT Scan, Defibrillator, Dialysis,
+  // Oxygen, Blood Bank, Cardiologist, Neurologist, Surgeon,
+  // Orthopedic, Gynecologist, Pediatrician, ICU, Operation Theater,
+  // Emergency Ward, Trauma Center, General Physician
+  // Maximum 6 items. If unclear, include 'Emergency Ward' only.
   "medications_mentioned": ["string", ...],
   "allergies_active": ["string", ...],
   "estimated_patient_age": "string or null",

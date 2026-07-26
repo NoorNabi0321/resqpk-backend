@@ -1,7 +1,12 @@
 // Module 6 — AI report routes.
 import express from 'express';
 import { authenticate, requireRole } from '../middleware/auth.js';
-import { uploadMiddleware, generateReport, getReport } from '../controllers/ai.controller.js';
+import {
+  uploadMiddleware,
+  generateReport,
+  getReport,
+  getReportPdf,
+} from '../controllers/ai.controller.js';
 
 const router = express.Router();
 
@@ -9,6 +14,8 @@ const router = express.Router();
 router.post('/report', authenticate, requireRole('patient'), uploadMiddleware, generateReport);
 
 // Patient (own case) or hospital admin (their hospital) reads the report.
+// The /pdf variant is declared first so it isn't captured by :caseId.
+router.get('/report/:caseId/pdf', authenticate, getReportPdf);
 router.get('/report/:caseId', authenticate, getReport);
 
 export default router;

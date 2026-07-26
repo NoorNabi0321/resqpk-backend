@@ -268,3 +268,100 @@ Content-Type: application/json
 {
   "fcmToken": "fcm-token-from-firebase-here"
 }
+
+###############################################
+# v2 PHASE 2 — Resources, Decisions, Camps
+###############################################
+
+### Get my hospital resources
+GET http://localhost:3000/api/resources
+Authorization: Bearer HOSPITAL_TOKEN
+
+### Update a resource (mark CT scan down)
+PUT http://localhost:3000/api/resources/ct_scan
+Authorization: Bearer HOSPITAL_TOKEN
+Content-Type: application/json
+
+{ "status": "unavailable", "quantity": 0 }
+
+### Mark cardiologist off duty (drives the redirect scenario)
+PUT http://localhost:3000/api/resources/cardiologist
+Authorization: Bearer HOSPITAL_TOKEN
+Content-Type: application/json
+
+{ "status": "unavailable", "quantity": 0 }
+
+### Resource match for a case
+GET http://localhost:3000/api/resources/match/CASE_ID
+Authorization: Bearer HOSPITAL_TOKEN
+
+### Alternative hospitals for redirect
+GET http://localhost:3000/api/resources/alternatives/CASE_ID
+Authorization: Bearer HOSPITAL_TOKEN
+
+### Decision presets (both frontends read these)
+GET http://localhost:3000/api/decisions/constants
+Authorization: Bearer HOSPITAL_TOKEN
+
+### Accept a case
+POST http://localhost:3000/api/decisions/accept
+Authorization: Bearer HOSPITAL_TOKEN
+Content-Type: application/json
+
+{ "caseId": "CASE_ID", "preparationNote": "ICU prepared" }
+
+### Redirect a case
+POST http://localhost:3000/api/decisions/redirect
+Authorization: Bearer HOSPITAL_TOKEN
+Content-Type: application/json
+
+{ "caseId": "CASE_ID", "newHospitalId": "HOSPITAL2_ID",
+  "reason": "No ICU bed available" }
+
+### Send quick message (hospital)
+POST http://localhost:3000/api/decisions/message
+Authorization: Bearer HOSPITAL_TOKEN
+Content-Type: application/json
+
+{ "caseId": "CASE_ID", "messageKey": "gate_2" }
+
+### Send quick message (driver)
+POST http://localhost:3000/api/decisions/message
+Authorization: Bearer DRIVER_TOKEN
+Content-Type: application/json
+
+{ "caseId": "CASE_ID", "messageKey": "five_min_away" }
+
+### Message history for a case
+GET http://localhost:3000/api/decisions/messages/CASE_ID
+Authorization: Bearer HOSPITAL_TOKEN
+
+### Fresh signed PDF URL for a report
+GET http://localhost:3000/api/ai/report/CASE_ID/pdf
+Authorization: Bearer HOSPITAL_TOKEN
+
+### Register a camp (public)
+POST http://localhost:3000/api/camps/register
+Content-Type: application/json
+
+{
+  "campName": "Test Eye Camp",
+  "organizerName": "Test NGO",
+  "description": "Free eye checkup",
+  "lat": 25.40, "lng": 68.37,
+  "address": "Latifabad, Hyderabad",
+  "servicesOffered": ["Eye checkup", "Free glasses"],
+  "startDate": "2026-07-25", "endDate": "2026-08-05",
+  "contactPhone": "03219999999",
+  "adminEmail": "eyecamp@test.resqpk.app",
+  "adminPassword": "Camp1234!",
+  "adminFullName": "Camp Admin"
+}
+
+### Nearby camps (as patient)
+GET http://localhost:3000/api/camps/nearby?lat=25.3792&lng=68.3683
+Authorization: Bearer PATIENT_TOKEN
+
+### Camp dashboard (as camp admin)
+GET http://localhost:3000/api/camps/dashboard/me
+Authorization: Bearer CAMP_ADMIN_TOKEN

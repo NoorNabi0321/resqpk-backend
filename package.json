@@ -38,6 +38,7 @@
     "node-cron": "^4.5.0",
     "node-fetch": "^3.3.2",
     "openai": "^6.44.0",
+    "pdfkit": "^0.19.1",
     "socket.io": "^4.8.3"
   },
   "devDependencies": {

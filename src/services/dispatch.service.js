@@ -59,7 +59,7 @@ export async function notifyDriverBatch(caseId, drivers, batchNumber) {
 
   const { data: emergencyCase } = await supabaseAdmin
     .from('emergency_cases')
-    .select('case_number, patient_lat, patient_lng, patient:users(full_name)')
+    .select('case_number, patient_lat, patient_lng, patient:patient_id(full_name)')
     .eq('id', caseId)
     .maybeSingle();
 
