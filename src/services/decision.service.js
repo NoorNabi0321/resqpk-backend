@@ -100,9 +100,14 @@ export async function acceptCase({ caseId, hospitalAdminUserId, hospitalId, prep
     timestamp,
   };
 
-  // Driver and patient both listen in the case room.
+  // Driver and patient both listen in the case room. The driver room is
+  // targeted too so the decision still lands if their app reconnected and has
+  // not rejoined the case room yet.
   emit(ROOMS.caseRoom(caseId), EVENTS.DECISION.CASE_ACCEPTED, payload);
   emit(ROOMS.hospitalRoom(hospitalId), EVENTS.DECISION.CASE_ACCEPTED, payload);
+  if (emergencyCase.driver_id) {
+    emit(ROOMS.driverRoom(emergencyCase.driver_id), EVENTS.DECISION.CASE_ACCEPTED, payload);
+  }
 
   const token = await getDriverPushToken(emergencyCase.driver_id);
   await notificationService.sendDriverDecisionNotification(token, {

@@ -296,12 +296,157 @@ export async function runDispatchCycle(caseId, patientLat, patientLng) {
   return { success: false, reason: 'no_driver_found' };
 }
 
+// 10. Hand the case over to another nearby driver.
+// Real ambulances break down and get stuck in traffic; without this the
+// patient would keep waiting on a vehicle that cannot reach them.
+export async function handoffCase({ caseId, currentDriverId, reason }) {
+  const io = getIO();
+
+  const { data: emergencyCase } = await supabaseAdmin
+    .from('emergency_cases')
+    .select('id, case_number, driver_id, status, patient_id, patient_lat, patient_lng, hospital_id')
+    .eq('id', caseId)
+    .maybeSingle();
+  if (!emergencyCase) throw new Error('Case not found');
+  if (emergencyCase.driver_id !== currentDriverId) throw new Error('Not your case');
+
+  // Once the patient is aboard, swapping vehicles is a physical transfer that
+  // cannot be arranged from this screen.
+  if (!['driver_assigned', 'arrived'].includes(emergencyCase.status)) {
+    throw new Error('Handoff is only possible before the patient is picked up');
+  }
+
+  // Nearest available driver to the patient, excluding this one. Radius grows
+  // the same way the original dispatch does.
+  let replacement = null;
+  for (const radius of [2000, 5000, 10000, 20000]) {
+    // eslint-disable-next-line no-await-in-loop
+    const candidates = await findAvailableDrivers(
+      Number(emergencyCase.patient_lat),
+      Number(emergencyCase.patient_lng),
+      radius,
+    );
+    replacement = candidates.find((d) => d.id !== currentDriverId) || null;
+    if (replacement) break;
+  }
+  if (!replacement) {
+    throw new Error('No other ambulance is available nearby right now');
+  }
+
+  const eta = await mapsService.getDistanceAndETA(
+    Number(replacement.current_lat),
+    Number(replacement.current_lng),
+    Number(emergencyCase.patient_lat),
+    Number(emergencyCase.patient_lng),
+  );
+
+  const now = new Date().toISOString();
+  const { error } = await supabaseAdmin
+    .from('emergency_cases')
+    .update({
+      driver_id: replacement.id,
+      status: 'driver_assigned', // the new driver still has to reach the patient
+      driver_assigned_at: now,
+      driver_arrived_at: null,
+      estimated_driver_arrival_seconds: eta.durationSeconds,
+    })
+    .eq('id', caseId);
+  if (error) throw new Error(error.message);
+
+  // Free the old ambulance, reserve the new one.
+  await supabaseAdmin.from('drivers').update({ is_available: true }).eq('id', currentDriverId);
+  await supabaseAdmin.from('drivers').update({ is_available: false }).eq('id', replacement.id);
+
+  const { data: oldDriver } = await supabaseAdmin
+    .from('drivers')
+    .select('vehicle_number, users(full_name)')
+    .eq('id', currentDriverId)
+    .maybeSingle();
+
+  const payload = {
+    caseId,
+    caseNumber: emergencyCase.case_number,
+    reason: reason || null,
+    previousDriver: {
+      id: currentDriverId,
+      fullName: oldDriver?.users?.full_name,
+      vehicleNumber: oldDriver?.vehicle_number,
+    },
+    driver: {
+      id: replacement.id,
+      fullName: replacement.users?.full_name,
+      phone: replacement.users?.phone,
+      vehicleNumber: replacement.vehicle_number,
+      currentLat: replacement.current_lat,
+      currentLng: replacement.current_lng,
+    },
+    etaSeconds: eta.durationSeconds,
+    etaText: eta.durationText,
+    timestamp: now,
+  };
+
+  // Patient: new driver details + ETA so tracking re-points at the new vehicle.
+  io?.to(ROOMS.caseRoom(caseId)).emit(EVENTS.EMERGENCY.DRIVER_CHANGED, payload);
+  io?.to(ROOMS.patientRoom(emergencyCase.patient_id)).emit(
+    EVENTS.EMERGENCY.DRIVER_CHANGED,
+    payload,
+  );
+
+  // Old driver: release their navigation screen.
+  io?.to(ROOMS.driverRoom(currentDriverId)).emit(EVENTS.EMERGENCY.HANDOFF_RELEASED, {
+    caseId,
+    newDriverName: replacement.users?.full_name,
+  });
+
+  // New driver: this arrives as a normal assignment.
+  io?.to(ROOMS.driverRoom(replacement.id)).emit(EVENTS.EMERGENCY.DRIVER_ASSIGNED, payload);
+
+  if (emergencyCase.hospital_id) {
+    io?.to(ROOMS.hospitalRoom(emergencyCase.hospital_id)).emit(
+      EVENTS.HOSPITAL.HOSPITAL_CASE_UPDATE,
+      { caseId, type: 'driver_changed', ...payload },
+    );
+  }
+
+  // Best-effort push to the driver taking over.
+  try {
+    await notificationService?.sendDriverDispatchNotification?.(replacement.users?.fcm_token, {
+      caseId,
+      caseNumber: emergencyCase.case_number,
+      patientName: 'Patient',
+      distanceText: eta.distanceText,
+    });
+  } catch (err) {
+    logger.warn(`FCM handoff notify failed: ${err.message}`);
+  }
+
+  // Visible in the case feed on the hospital dashboard.
+  try {
+    await supabaseAdmin.from('case_messages').insert({
+      case_id: caseId,
+      sender_role: 'driver',
+      message_key: 'handoff',
+      message_text: `Ambulance handed over to ${replacement.users?.full_name || 'another driver'}${
+        reason ? ` — ${reason}` : ''
+      }`,
+    });
+  } catch {
+    // The feed entry is history, never a reason to fail the handoff.
+  }
+
+  logger.info(
+    `Case ${emergencyCase.case_number} handed off ${currentDriverId} -> ${replacement.id} (ETA ${eta.durationText})`,
+  );
+  return payload;
+}
+
 export default {
   findAvailableDrivers,
   notifyDriverBatch,
   waitForDriverResponse,
   assignDriver,
   runDispatchCycle,
+  handoffCase,
   getAlreadyNotifiedDriverIds,
   markBatchAsTimeout,
 };

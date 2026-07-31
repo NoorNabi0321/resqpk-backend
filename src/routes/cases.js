@@ -3,7 +3,9 @@ import { authenticate, requireRole } from '../middleware/auth.js';
 import {
   driverRespond,
   updateStatus,
+  handoffCase,
   getCaseDetails,
+  getMyActiveCase,
   getCaseRoute,
   changeHospital,
   getShareTracking,
@@ -23,6 +25,10 @@ router.put('/beds', authenticate, requireRole('hospital_admin'), updateBeds);
 // Driver only.
 router.post('/respond', authenticate, requireRole('driver'), driverRespond);
 router.put('/status', authenticate, requireRole('driver'), updateStatus);
+router.post('/handoff', authenticate, requireRole('driver'), handoffCase);
+
+// Session restore — declared before /:id so 'active' isn't read as an id.
+router.get('/active/me', authenticate, getMyActiveCase);
 
 // Patient or assigned driver.
 router.get('/:id/route', authenticate, getCaseRoute);

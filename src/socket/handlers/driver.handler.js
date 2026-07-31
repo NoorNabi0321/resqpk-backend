@@ -24,6 +24,38 @@ function isValidPkCoord(lat, lng) {
 export default function driverHandler(io, socket) {
   const driverId = socket.driverId;
 
+  // EVENT 0 — join the case room. Hospital decisions (accept / redirect /
+  // quick messages) are broadcast to case:{id}; without this the driver's app
+  // would only ever see the initial dispatch and never a decision.
+  socket.on(EVENTS.DRIVER.DRIVER_JOIN_CASE, async (data, callback) => {
+    try {
+      const caseId = data?.caseId;
+      if (!caseId) throw new Error('caseId is required');
+
+      const { data: emergencyCase } = await supabaseAdmin
+        .from('emergency_cases')
+        .select('id, driver_id')
+        .eq('id', caseId)
+        .maybeSingle();
+      if (!emergencyCase) throw new Error('Case not found');
+      if (emergencyCase.driver_id !== driverId) throw new Error('Not your case');
+
+      socket.join(ROOMS.caseRoom(caseId));
+      socket.activeCaseId = caseId;
+      logger.info(`Driver ${driverId} joined case room: ${caseId}`);
+      if (typeof callback === 'function') callback({ success: true });
+    } catch (err) {
+      logger.warn(`Driver join_case failed: ${err.message}`);
+      if (typeof callback === 'function') callback({ success: false, error: err.message });
+    }
+  });
+
+  socket.on(EVENTS.DRIVER.DRIVER_LEAVE_CASE, (data) => {
+    const caseId = data?.caseId || socket.activeCaseId;
+    if (caseId) socket.leave(ROOMS.caseRoom(caseId));
+    socket.activeCaseId = null;
+  });
+
   // EVENT 1 — go online (becomes available for dispatch).
   socket.on(EVENTS.DRIVER.DRIVER_GO_ONLINE, async (data, callback) => {
     try {

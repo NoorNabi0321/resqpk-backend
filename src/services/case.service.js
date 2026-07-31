@@ -364,6 +364,39 @@ export async function getCaseDetails(caseId, requestingUser) {
   return emergencyCase;
 }
 
+// 6a. The caller's currently-running case, if any. Lets the apps resume where
+// the user left off instead of restarting at the home screen after a restart.
+export async function getMyActiveCase(user) {
+  const activeStatuses = ['pending', 'searching', 'driver_assigned', 'arrived', 'en_route'];
+
+  let query = supabaseAdmin
+    .from('emergency_cases')
+    .select(
+      `*,
+       patient:patient_id(full_name, phone, medical_profiles(blood_group, gender, date_of_birth, chronic_conditions, allergies)),
+       driver:drivers(user_id, vehicle_number, current_lat, current_lng, heading, users(full_name, phone)),
+       hospital:hospital_id(name, lat, lng, emergency_phone),
+       ai_report:ai_reports(urgency_level, emergency_type, consciousness_state, key_observations, first_aid_suggestion, resources_needed, pdf_url)`,
+    )
+    .in('status', activeStatuses)
+    .order('sos_triggered_at', { ascending: false })
+    .limit(1);
+
+  if (user.role === 'driver') {
+    if (!user.driver_id) return null;
+    // A driver only has work to resume once they are actually assigned.
+    query = query
+      .eq('driver_id', user.driver_id)
+      .in('status', ['driver_assigned', 'arrived', 'en_route']);
+  } else {
+    query = query.eq('patient_id', user.id);
+  }
+
+  const { data, error } = await query.maybeSingle();
+  if (error) throw new Error(error.message);
+  return data || null;
+}
+
 // 6b. Road-following route for the case's current leg (patient or driver).
 // driver_assigned  → driver's live position → patient (pickup leg)
 // arrived          → patient → hospital (preview of the drop-off leg)
@@ -651,6 +684,7 @@ export default {
   handleMissedCallSOS,
   handleSMSWebhook,
   getCaseDetails,
+  getMyActiveCase,
   getCaseRoute,
   listNearbyHospitals,
   changeCaseHospital,

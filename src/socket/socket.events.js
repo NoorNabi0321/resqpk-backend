@@ -15,6 +15,10 @@ export const EVENTS = Object.freeze({
     DRIVER_LOCATION_BROADCAST: 'driver:location_broadcast',
     DRIVER_STATUS_CHANGED: 'driver:status_changed',
     DRIVER_HEADING_UPDATE: 'driver:heading_update',
+    // v2 — the driver joins the case room so hospital decisions reach them.
+    DRIVER_JOIN_CASE: 'driver:join_case',
+    DRIVER_LEAVE_CASE: 'driver:leave_case',
+    DRIVER_HANDOFF: 'driver:handoff',
   }),
   PATIENT: Object.freeze({
     PATIENT_JOIN_CASE: 'patient:join_case',
@@ -30,6 +34,9 @@ export const EVENTS = Object.freeze({
     CASE_CANCELLED: 'emergency:case_cancelled',
     NO_DRIVER_FOUND: 'emergency:no_driver_found',
     HOSPITAL_CHANGED: 'emergency:hospital_changed',
+    // v2 — the assigned ambulance was handed over to another driver.
+    DRIVER_CHANGED: 'emergency:driver_changed',
+    HANDOFF_RELEASED: 'emergency:handoff_released',
   }),
   ETA: Object.freeze({
     ETA_UPDATE: 'eta:update',

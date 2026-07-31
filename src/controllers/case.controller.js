@@ -1,4 +1,5 @@
 import caseService from '../services/case.service.js';
+import dispatchService from '../services/dispatch.service.js';
 import { driverRespondSchema, updateCaseStatusSchema, validate } from '../validators/sos.validator.js';
 import { successResponse, errorResponse } from '../utils/response.js';
 
@@ -31,6 +32,33 @@ export async function updateStatus(req, res) {
     return successResponse(res, data, 'Status updated', 200);
   } catch (err) {
     return errorResponse(res, err.message, 400);
+  }
+}
+
+// GET /api/cases/active/me — the caller's in-progress case, or null
+export async function getMyActiveCase(req, res) {
+  try {
+    const data = await caseService.getMyActiveCase(req.user);
+    return successResponse(res, data, data ? 'Active case' : 'No active case', 200);
+  } catch (err) {
+    return errorResponse(res, err.message, 400);
+  }
+}
+
+// POST /api/cases/handoff (driver) — pass the case to another nearby ambulance
+export async function handoffCase(req, res) {
+  const { caseId, reason } = req.body || {};
+  if (!caseId) return errorResponse(res, 'caseId is required', 400);
+  try {
+    const data = await dispatchService.handoffCase({
+      caseId,
+      currentDriverId: req.user.driver_id,
+      reason: reason || null,
+    });
+    return successResponse(res, data, 'Case handed over', 200);
+  } catch (err) {
+    const code = err.message.includes('not found') ? 404 : 400;
+    return errorResponse(res, err.message, code);
   }
 }
 
