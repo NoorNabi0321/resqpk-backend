@@ -72,7 +72,7 @@ async function createAssignedCase(patientToken, hospitalId, driverId) {
   const trigger = await api('/api/sos/trigger', {
     method: 'POST',
     token: patientToken,
-    body: { lat: 25.3992, lng: 68.3683, accuracy: 12, triggerMethod: 'app_sos' },
+    body: { lat: 25.3992, lng: 68.3683, accuracy: 12 },
   });
   const caseId = trigger.body?.data?.caseId || trigger.body?.data?.id;
   if (!caseId) throw new Error(`SOS trigger failed: ${JSON.stringify(trigger.body)}`);

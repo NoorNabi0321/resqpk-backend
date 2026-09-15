@@ -7,7 +7,6 @@ import { supabaseAdmin } from '../config/supabase.js';
 import config from '../config/env.js';
 import mapsService from './maps.service.js';
 import notificationService from './notification.service.js'; // filled in B4 (best-effort)
-import hospitalAssignment from './hospital-assignment.service.js';
 import { getIO } from '../socket/socket.server.js';
 import { EVENTS, ROOMS } from '../socket/socket.events.js';
 import logger from '../middleware/logger.js';
@@ -146,7 +145,7 @@ export async function assignDriver(caseId, driverId) {
 
   const { data: emergencyCase } = await supabaseAdmin
     .from('emergency_cases')
-    .select('patient_id, patient_lat, patient_lng, hospital_id, case_number, trigger_method')
+    .select('patient_id, patient_lat, patient_lng, hospital_id, case_number')
     .eq('id', caseId)
     .maybeSingle();
 
@@ -202,18 +201,8 @@ export async function assignDriver(caseId, driverId) {
 
   io?.to(ROOMS.patientRoom(emergencyCase.patient_id)).emit(EVENTS.EMERGENCY.DRIVER_ASSIGNED, payload);
 
-  // Hospitals are NOT told here. For app-triggered SOS the patient confirms (or
-  // changes) the suggested hospital first, and only that choice reaches a
-  // dashboard. SMS and missed-call SOS have no app to confirm from, so they
-  // get the nearest hospital straight away — otherwise no hospital would ever
-  // hear about them.
-  if (emergencyCase.trigger_method && emergencyCase.trigger_method !== 'app_sos') {
-    try {
-      await hospitalAssignment.autoAssignNearestHospital(caseId);
-    } catch (err) {
-      logger.warn(`Auto hospital assignment failed for ${caseId}: ${err.message}`);
-    }
-  }
+  // Hospitals are NOT told here. The patient confirms (or changes) the
+  // suggested hospital first, and only that choice reaches a dashboard.
 
   logger.info(`Driver ${driverId} assigned to case ${caseId} (ETA ${eta.durationText})`);
   return payload;

@@ -2,7 +2,6 @@ import caseService from '../services/case.service.js';
 import {
   sosRequestSchema,
   cancelSOSSchema,
-  missedCallSOSSchema,
   validate,
 } from '../validators/sos.validator.js';
 import { successResponse, errorResponse } from '../utils/response.js';
@@ -35,29 +34,3 @@ export async function cancelSOS(req, res) {
   }
 }
 
-// POST /api/sos/missed-call-webhook (public — Android gateway).
-// Always responds 200 so the gateway never retries.
-export async function handleMissedCallWebhook(req, res) {
-  const { error, value } = validate(missedCallSOSSchema, req.body);
-  if (error) {
-    return successResponse(res, { success: false, reason: 'invalid_request' }, 'Received', 200);
-  }
-  try {
-    const data = await caseService.handleMissedCallSOS(value);
-    return successResponse(res, data, 'Received', 200);
-  } catch {
-    return successResponse(res, { success: false, reason: 'error' }, 'Received', 200);
-  }
-}
-
-// POST /api/sos/sms-webhook (public — SMS forwarder app).
-// Body: { callerPhone, messageBody, gatewaySecret }. Always 200 so the app never
-// spam-retries; failures are logged internally.
-export async function smsWebhookController(req, res) {
-  try {
-    const data = await caseService.handleSMSWebhook(req.body || {});
-    return successResponse(res, data, 'Received', 200);
-  } catch {
-    return successResponse(res, { success: false, reason: 'error' }, 'Received', 200);
-  }
-}

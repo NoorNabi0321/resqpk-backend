@@ -1,6 +1,5 @@
 // Case orchestration: creating an SOS (and kicking off dispatch), driver
-// responses, status transitions, cancellation, missed-call trigger, and
-// case/tracking lookups.
+// responses, status transitions, cancellation, and case/tracking lookups.
 import { supabaseAdmin } from '../config/supabase.js';
 import dispatchService from './dispatch.service.js';
 import mapsService from './maps.service.js';
@@ -14,7 +13,7 @@ import logger from '../middleware/logger.js';
 // No hospital is attached here. A hospital only sees a case once an ambulance
 // has accepted AND the patient has confirmed (or changed) the suggested
 // hospital — so dashboards never list requests nobody is responding to.
-export async function createSOS({ patientId, lat, lng, accuracy, address, triggerMethod = 'app_sos' }) {
+export async function createSOS({ patientId, lat, lng, accuracy, address }) {
   // Nearest emergency-capable hospital — returned only as a suggestion.
   const { data: hospitals } = await supabaseAdmin
     .from('hospitals')
@@ -32,7 +31,7 @@ export async function createSOS({ patientId, lat, lng, accuracy, address, trigge
       patient_address: address || null,
       hospital_id: null,
       status: 'pending',
-      trigger_method: triggerMethod,
+      trigger_method: 'app_sos',
       sos_triggered_at: new Date().toISOString(),
     })
     .select('id, case_number')
@@ -209,147 +208,6 @@ export async function cancelSOS({ caseId, patientId, reason = 'false_alarm' }) {
     .eq('id', caseId);
 
   return { success: true };
-}
-
-// 5. Missed-call trigger (basic — Module 7 adds normalization + rate limiting).
-export async function handleMissedCallSOS({ callerPhone, gatewaySecret }) {
-  if (gatewaySecret !== process.env.MISSED_CALL_GATEWAY_SECRET) {
-    logger.warn('Missed-call webhook with invalid gateway secret');
-    return { success: false, reason: 'unauthorized' };
-  }
-
-  const { data: user } = await supabaseAdmin
-    .from('users')
-    .select('id, last_known_lat, last_known_lng')
-    .eq('phone', callerPhone)
-    .eq('role', 'patient')
-    .maybeSingle();
-  if (!user) return { success: false, reason: 'phone_not_registered' };
-
-  if (user.last_known_lat == null || user.last_known_lng == null) {
-    return { success: false, reason: 'no_location_on_file' };
-  }
-
-  const result = await createSOS({
-    patientId: user.id,
-    lat: Number(user.last_known_lat),
-    lng: Number(user.last_known_lng),
-    triggerMethod: 'missed_call',
-  });
-
-  return { success: true, caseId: result.caseId, caseNumber: result.caseNumber };
-}
-
-// Module 7 — phone/keyword helpers for the SMS gateway.
-const SMS_TRIGGERS = ['sos', 'help', 'emergency', 'ambulance', 'مدد'];
-
-// Normalize Pakistani numbers to the stored 03XXXXXXXXX form.
-function normalizePhone(phone) {
-  const p = String(phone || '').replace(/[\s-]/g, '');
-  if (p.startsWith('+92')) return `0${p.slice(3)}`;
-  if (p.startsWith('92') && p.length === 12) return `0${p.slice(2)}`;
-  return p;
-}
-
-function isSMSTrigger(message) {
-  const n = String(message || '').toLowerCase().trim();
-  return SMS_TRIGGERS.some((t) => n.startsWith(t));
-}
-
-// 5b. SMS-based offline SOS trigger (primary offline path — see [[gateway-decision]]).
-// Patient SMSes a keyword (e.g. "SOS") to the gateway number; the forwarder app
-// POSTs { callerPhone, messageBody, gatewaySecret } here. Always best-effort.
-export async function handleSMSWebhook({ callerPhone, messageBody, gatewaySecret }) {
-  const expected = process.env.SMS_GATEWAY_SECRET || process.env.MISSED_CALL_GATEWAY_SECRET;
-  if (!expected || gatewaySecret !== expected) {
-    logger.warn('SMS webhook with invalid/missing gateway secret');
-    return { success: false, reason: 'unauthorized' };
-  }
-
-  if (!isSMSTrigger(messageBody)) {
-    logger.info(`SMS ignored (no SOS keyword): "${messageBody}"`);
-    return { success: false, reason: 'not_a_trigger' };
-  }
-
-  const phone = normalizePhone(callerPhone);
-
-  // Ignore the gateway phone messaging itself (common during testing).
-  if (
-    process.env.GATEWAY_PHONE_NUMBER &&
-    phone === normalizePhone(process.env.GATEWAY_PHONE_NUMBER)
-  ) {
-    logger.info('Gateway self-SMS detected — ignoring');
-    return { success: false, reason: 'self_message' };
-  }
-
-  const notes = String(messageBody || '').trim().split(/\s+/).slice(1).join(' ') || null;
-
-  const { data: user } = await supabaseAdmin
-    .from('users')
-    .select('id, full_name, last_known_lat, last_known_lng, last_location_updated_at')
-    .eq('phone', phone)
-    .eq('role', 'patient')
-    .maybeSingle();
-  if (!user) {
-    logger.warn(`SMS SOS from unregistered number: ${phone}`);
-    return { success: false, reason: 'not_registered' };
-  }
-
-  // Rate limit: one offline SOS per number per 5 minutes.
-  const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-  const { data: recent } = await supabaseAdmin
-    .from('emergency_cases')
-    .select('id')
-    .eq('patient_id', user.id)
-    .in('trigger_method', ['sms', 'missed_call'])
-    .gt('sos_triggered_at', fiveMinAgo)
-    .not('status', 'in', '(cancelled,no_driver_found)')
-    .limit(1);
-  if (recent && recent.length) {
-    logger.warn(`Duplicate SMS SOS blocked for ${phone}`);
-    return { success: false, reason: 'rate_limited' };
-  }
-
-  // Don't open a second case if one is already active.
-  const { data: active } = await supabaseAdmin
-    .from('emergency_cases')
-    .select('id')
-    .eq('patient_id', user.id)
-    .in('status', ['pending', 'searching', 'driver_assigned', 'en_route', 'arrived'])
-    .limit(1);
-  if (active && active.length) {
-    return { success: false, reason: 'already_active', caseId: active[0].id };
-  }
-
-  if (user.last_known_lat == null || user.last_known_lng == null) {
-    logger.warn(`SMS SOS but no location on file for user ${user.id}`);
-    return { success: false, reason: 'no_location', userId: user.id };
-  }
-  const stale =
-    !!user.last_location_updated_at &&
-    new Date(user.last_location_updated_at) < new Date(Date.now() - 24 * 3600 * 1000);
-  if (notes) logger.info(`SMS SOS note from ${phone}: "${notes}"`);
-
-  const result = await createSOS({
-    patientId: user.id,
-    lat: Number(user.last_known_lat),
-    lng: Number(user.last_known_lng),
-    triggerMethod: 'sms',
-  });
-
-  logger.info(`SMS SOS created for ${user.full_name} (${phone}) → case ${result.caseNumber}`);
-  return {
-    success: true,
-    caseId: result.caseId,
-    caseNumber: result.caseNumber,
-    patientName: user.full_name,
-    usedLocation: {
-      lat: Number(user.last_known_lat),
-      lng: Number(user.last_known_lng),
-      updatedAt: user.last_location_updated_at,
-      stale,
-    },
-  };
 }
 
 // 6. Full case detail — the patient, the assigned driver, or the hospital the
@@ -671,8 +529,6 @@ export default {
   driverRespondToCase,
   updateCaseStatus,
   cancelSOS,
-  handleMissedCallSOS,
-  handleSMSWebhook,
   getCaseDetails,
   getMyActiveCase,
   getCaseRoute,

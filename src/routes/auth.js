@@ -8,7 +8,6 @@ import {
   loginHospitalAdmin,
   getMyProfile,
   updateMedicalProfile,
-  updateLocation,
   updateFCMToken,
   refreshToken,
 } from '../controllers/auth.controller.js';
@@ -26,7 +25,6 @@ router.post('/hospital/login', loginHospitalAdmin);
 // Protected routes (require a valid JWT).
 router.get('/me', authenticate, getMyProfile);
 router.put('/medical-profile', authenticate, requireRole('patient'), updateMedicalProfile);
-router.put('/location', authenticate, updateLocation);
 router.put('/fcm-token', authenticate, updateFCMToken);
 router.post('/refresh', authenticate, refreshToken);
 

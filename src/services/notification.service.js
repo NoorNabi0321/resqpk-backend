@@ -12,7 +12,7 @@ const WEEKLY_TIPS = [
   { title: 'Is your medical profile complete?', body: 'Help us help you faster — update your blood group.' },
   { title: 'Road accident response', body: 'Most deaths are preventable. Learn what to do at the scene.' },
   { title: 'Heart attack signs', body: 'Learn to recognize cardiac emergency signs before it happens.' },
-  { title: 'Is your location up to date?', body: 'Open ResQPK to refresh your location for offline SOS.' },
+  { title: 'Save these numbers', body: 'Rescue 1122, Edhi 115, Chhipa 1020 — keep them handy for emergencies.' },
   { title: 'Choking — act fast', body: 'Learn the Heimlich maneuver. It takes 30 seconds to learn.' },
   { title: 'Burns first aid', body: 'Did you know ice makes burns worse? Open ResQPK to learn why.' },
 ];

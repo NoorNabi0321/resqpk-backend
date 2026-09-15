@@ -5,7 +5,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 // Variables that MUST be present for the backend to boot.
-// Integration keys added in later modules (Google Maps, OpenAI, gateway URL) are
+// Integration keys added in later modules (OpenRouteService, OpenAI) are
 // read with safe fallbacks below so early modules can run before those keys exist.
 const REQUIRED_VARS = [
   'NODE_ENV',
@@ -50,7 +50,6 @@ const config = {
 
   // App URLs
   frontendUrl: process.env.FRONTEND_URL || 'http://localhost:5173',
-  missedCallGatewayUrl: process.env.MISSED_CALL_GATEWAY_URL || '',
 };
 
 export default config;

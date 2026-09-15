@@ -6,8 +6,7 @@
 // ambulance has accepted yet.
 //
 // Shared by the patient confirming the suggested hospital, the patient picking
-// a different one, and the automatic fallback for SOS sources that have no app
-// to confirm from (SMS, missed call) or a patient who never answered.
+// a different one, and the automatic fallback for a patient who never answered.
 import { supabaseAdmin } from '../config/supabase.js';
 import mapsService from './maps.service.js';
 import { getIO } from '../socket/socket.server.js';

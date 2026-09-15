@@ -2,15 +2,11 @@
 import Joi from 'joi';
 import { validate } from './auth.validator.js';
 
-// Accepts the formats normalizePhone() handles: +92XXXXXXXXXX, 92XXXXXXXXXX, 03XXXXXXXXX.
-const GATEWAY_PHONE_PATTERN = /^(\+?92\d{10}|03\d{9})$/;
-
 // 1. SOS trigger
 export const sosRequestSchema = Joi.object({
   lat: Joi.number().min(-90).max(90).required(),
   lng: Joi.number().min(-180).max(180).required(),
   accuracy: Joi.number().min(0).optional(),
-  triggerMethod: Joi.string().valid('app_sos', 'missed_call', 'sms').default('app_sos'),
   address: Joi.string().max(300).allow('', null),
   patientNote: Joi.string().max(500).allow('', null),
 });
@@ -33,14 +29,6 @@ export const updateCaseStatusSchema = Joi.object({
   status: Joi.string().valid('en_route', 'arrived', 'completed').required(),
 });
 
-// 5. Missed-call webhook (from the Android gateway)
-export const missedCallSOSSchema = Joi.object({
-  callerPhone: Joi.string().pattern(GATEWAY_PHONE_PATTERN).required().messages({
-    'string.pattern.base': 'callerPhone must be a valid Pakistani number',
-  }),
-  gatewaySecret: Joi.string().required(),
-});
-
 export { validate };
 
 export default {
@@ -48,6 +36,5 @@ export default {
   cancelSOSSchema,
   driverRespondSchema,
   updateCaseStatusSchema,
-  missedCallSOSSchema,
   validate,
 };
