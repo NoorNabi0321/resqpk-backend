@@ -19,9 +19,9 @@ export default function hospitalHandler(io, socket) {
         .from('emergency_cases')
         .select(
           `*,
-           patient:users(full_name, medical_profiles(blood_group, chronic_conditions, allergies)),
-           driver:drivers(vehicle_number, current_lat, current_lng, users(full_name)),
-           ai_report:ai_reports(urgency_level, emergency_type, consciousness_state, key_observations, first_aid_suggestion)`,
+           patient:patient_id(full_name, phone, medical_profiles(blood_group, gender, date_of_birth, chronic_conditions, allergies)),
+           driver:drivers(id, vehicle_number, current_lat, current_lng, users(full_name, phone)),
+           ai_report:ai_reports(urgency_level, emergency_type, consciousness_state, key_observations, first_aid_suggestion, resources_needed, pdf_url)`,
         )
         .eq('hospital_id', socket.hospitalId)
         .in('status', ['driver_assigned', 'en_route', 'arrived'])

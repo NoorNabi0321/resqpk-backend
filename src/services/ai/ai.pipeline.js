@@ -260,6 +260,9 @@ export async function processAIReport(caseId, patientId, inputs) {
       success: true,
       reportId: savedReport.id,
       caseId,
+      // The apps gate their result screen on this; without it a finished
+      // report looks unfinished and the input form is shown again.
+      generationStatus: 'completed',
       urgencyLevel: reportData.urgency_level,
       emergencyType: reportData.emergency_type,
       consciousnessState: reportData.consciousness_state,

@@ -4,13 +4,18 @@
 import { supabaseAdmin } from '../config/supabase.js';
 import dispatchService from './dispatch.service.js';
 import mapsService from './maps.service.js';
+import hospitalAssignment from './hospital-assignment.service.js';
 import { getIO } from '../socket/socket.server.js';
 import { EVENTS, ROOMS } from '../socket/socket.events.js';
 import logger from '../middleware/logger.js';
 
 // 1. Create an SOS case and start dispatch in the background.
+//
+// No hospital is attached here. A hospital only sees a case once an ambulance
+// has accepted AND the patient has confirmed (or changed) the suggested
+// hospital — so dashboards never list requests nobody is responding to.
 export async function createSOS({ patientId, lat, lng, accuracy, address, triggerMethod = 'app_sos' }) {
-  // Nearest emergency-capable hospital (pre-notification target).
+  // Nearest emergency-capable hospital — returned only as a suggestion.
   const { data: hospitals } = await supabaseAdmin
     .from('hospitals')
     .select('*')
@@ -25,7 +30,7 @@ export async function createSOS({ patientId, lat, lng, accuracy, address, trigge
       patient_lat: lat,
       patient_lng: lng,
       patient_address: address || null,
-      hospital_id: nearestHospital?.id || null,
+      hospital_id: null,
       status: 'pending',
       trigger_method: triggerMethod,
       sos_triggered_at: new Date().toISOString(),
@@ -44,7 +49,14 @@ export async function createSOS({ patientId, lat, lng, accuracy, address, trigge
     caseId: created.id,
     caseNumber: created.case_number,
     status: 'searching',
-    hospital: nearestHospital
+    // The patient app builds its tracking map from this response; without the
+    // coordinates it placed the patient marker at 0,0.
+    patient_lat: lat,
+    patient_lng: lng,
+    hospital_id: null,
+    // Offered to the patient as the default once an ambulance accepts. Kept
+    // out of `hospital` so the app never treats it as already chosen.
+    suggested_hospital: nearestHospital
       ? {
           id: nearestHospital.id,
           name: nearestHospital.name,
@@ -123,6 +135,16 @@ export async function updateCaseStatus({ caseId, driverId, status }) {
     .select()
     .single();
   if (error) throw new Error(error.message);
+
+  // Once the patient is aboard the ambulance needs a destination. If the
+  // patient never confirmed one, fall back to the nearest emergency hospital.
+  if (status === 'en_route' && !emergencyCase.hospital_id) {
+    try {
+      await hospitalAssignment.autoAssignNearestHospital(caseId);
+    } catch (err) {
+      logger.warn(`Auto hospital assignment at pickup failed for ${caseId}: ${err.message}`);
+    }
+  }
 
   // Free the driver once the trip is complete.
   if (status === 'completed') {
@@ -488,67 +510,35 @@ export async function listNearbyHospitals({ lat, lng }) {
     .sort((a, b) => a.distanceMeters - b.distanceMeters);
 }
 
-// 6d. Patient changes the destination hospital while the case is active.
+// 6d. Patient confirms the suggested hospital, or picks a different one.
+// Until this runs an app-triggered case has no hospital, so no dashboard shows
+// it — see hospital-assignment.service.js.
 export async function changeCaseHospital({ caseId, patientId, hospitalId }) {
   const { data: emergencyCase } = await supabaseAdmin
     .from('emergency_cases')
-    .select('id, status, patient_id, driver_id, hospital_id, case_number')
+    .select('id, status, patient_id')
     .eq('id', caseId)
     .maybeSingle();
   if (!emergencyCase) throw new Error('Case not found');
   if (emergencyCase.patient_id !== patientId) throw new Error('Not your case');
 
-  const changeable = ['pending', 'searching', 'driver_assigned', 'arrived', 'en_route'];
+  // A hospital is chosen after an ambulance accepts — never while still
+  // searching, which is exactly the request a hospital should not see.
+  const changeable = ['driver_assigned', 'arrived', 'en_route'];
   if (!changeable.includes(emergencyCase.status)) {
-    throw new Error('Hospital can no longer be changed for this case');
-  }
-
-  const { data: hospital } = await supabaseAdmin
-    .from('hospitals')
-    .select('id, name, lat, lng, is_active, has_emergency_ward')
-    .eq('id', hospitalId)
-    .maybeSingle();
-  if (!hospital || !hospital.is_active) throw new Error('Hospital not found');
-  if (!hospital.has_emergency_ward) throw new Error('Hospital has no emergency ward');
-
-  const { error } = await supabaseAdmin
-    .from('emergency_cases')
-    .update({ hospital_id: hospitalId })
-    .eq('id', caseId);
-  if (error) throw new Error(error.message);
-
-  // Notify everyone tracking this case (patient app + driver app), the hospital
-  // that lost the case, and the hospital that gained it.
-  const io = getIO();
-  const payload = {
-    caseId,
-    hospitalId: hospital.id,
-    hospitalName: hospital.name,
-    hospitalLat: Number(hospital.lat),
-    hospitalLng: Number(hospital.lng),
-  };
-  io?.to(ROOMS.caseRoom(caseId)).emit(EVENTS.EMERGENCY.HOSPITAL_CHANGED, payload);
-  if (emergencyCase.driver_id) {
-    io?.to(ROOMS.driverRoom(emergencyCase.driver_id)).emit(
-      EVENTS.EMERGENCY.HOSPITAL_CHANGED,
-      payload,
+    throw new Error(
+      ['pending', 'searching'].includes(emergencyCase.status)
+        ? 'You can choose a hospital once an ambulance has accepted your request'
+        : 'Hospital can no longer be changed for this case',
     );
   }
-  if (emergencyCase.hospital_id && emergencyCase.hospital_id !== hospitalId) {
-    io?.to(ROOMS.hospitalRoom(emergencyCase.hospital_id)).emit(EVENTS.HOSPITAL.HOSPITAL_CASE_UPDATE, {
-      caseId,
-      type: 'hospital_changed',
-      transferredTo: hospital.name,
-    });
-  }
-  io?.to(ROOMS.hospitalRoom(hospitalId)).emit(EVENTS.HOSPITAL.HOSPITAL_NEW_CASE, {
-    caseId,
-    caseNumber: emergencyCase.case_number,
-    type: 'hospital_changed',
-  });
 
-  logger.info(`Case ${emergencyCase.case_number} hospital changed to ${hospital.name}`);
-  return { success: true, hospital: payload };
+  const result = await hospitalAssignment.assignHospitalToCase({
+    caseId,
+    hospitalId,
+    source: 'patient',
+  });
+  return { success: true, hospital: result.hospital };
 }
 
 // 7. Public family tracking (no auth — by share token).

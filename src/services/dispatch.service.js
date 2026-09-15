@@ -1,19 +1,27 @@
-// Core dispatch engine: finds drivers with an expanding radius, notifies them
-// in batches, waits for an accept, and assigns the winner to the case.
+// Core dispatch engine: offers the case to the nearest drivers ONE AT A TIME,
+// three per search ring, widens the radius when a ring is exhausted, and
+// assigns the first driver who accepts.
 import crypto from 'crypto';
 
 import { supabaseAdmin } from '../config/supabase.js';
 import config from '../config/env.js';
 import mapsService from './maps.service.js';
 import notificationService from './notification.service.js'; // filled in B4 (best-effort)
+import hospitalAssignment from './hospital-assignment.service.js';
 import { getIO } from '../socket/socket.server.js';
 import { EVENTS, ROOMS } from '../socket/socket.events.js';
 import logger from '../middleware/logger.js';
 
-const DISPATCH_RADIUS_STEPS = [500, 1000, 2000, 5000]; // meters
-const DRIVERS_PER_BATCH = 3;
-const DRIVER_RESPONSE_TIMEOUT_MS = 15000; // 15 seconds
-const MAX_DISPATCH_ATTEMPTS = DISPATCH_RADIUS_STEPS.length;
+// Search rings, in meters. Each ring offers the case to at most
+// DRIVERS_PER_RING drivers not already asked, nearest first.
+const DISPATCH_RADIUS_STEPS = [2000, 5000, 10000, 20000];
+const DRIVERS_PER_RING = 3;
+// What the driver's request screen counts down from.
+const DRIVER_RESPONSE_TIMEOUT_MS = 15000;
+// Extra server-side wait, so an accept tapped in the last second — still in
+// flight — is not thrown away as a timeout.
+const RESPONSE_GRACE_MS = 3000;
+const POLL_INTERVAL_MS = 1500;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -42,117 +50,88 @@ export async function getAlreadyNotifiedDriverIds(caseId) {
   return (data || []).map((r) => r.driver_id);
 }
 
-// 7. Mark a batch's still-pending requests as timed out.
-export async function markBatchAsTimeout(caseId, driverBatch) {
+// 7. Close a request the driver never answered.
+export async function markRequestTimedOut(caseId, driverId) {
   await supabaseAdmin
     .from('case_driver_requests')
     .update({ response: 'timeout', responded_at: new Date().toISOString() })
     .eq('case_id', caseId)
-    .in('driver_id', driverBatch.map((d) => d.id))
+    .eq('driver_id', driverId)
     .eq('response', 'pending');
 }
 
-// 2. Notify up to DRIVERS_PER_BATCH drivers simultaneously.
-export async function notifyDriverBatch(caseId, drivers, batchNumber) {
-  const io = getIO();
-  const batch = drivers.slice(0, DRIVERS_PER_BATCH);
-
-  const { data: emergencyCase } = await supabaseAdmin
+// True while the case is still looking for an ambulance. Checked before every
+// offer so a patient who cancels stops the search immediately.
+async function caseStillSearching(caseId) {
+  const { data } = await supabaseAdmin
     .from('emergency_cases')
-    .select('case_number, patient_lat, patient_lng, patient:patient_id(full_name)')
+    .select('status')
     .eq('id', caseId)
     .maybeSingle();
-
-  const patientName = emergencyCase?.patient?.full_name || 'Anonymous Patient';
-
-  for (const driver of batch) {
-    await supabaseAdmin.from('case_driver_requests').insert({
-      case_id: caseId,
-      driver_id: driver.id,
-      batch_number: batchNumber,
-      distance_meters: driver.distanceMeters,
-      response: 'pending',
-    });
-
-    const payload = {
-      caseId,
-      caseNumber: emergencyCase?.case_number,
-      patientName,
-      patientLat: emergencyCase?.patient_lat,
-      patientLng: emergencyCase?.patient_lng,
-      distanceMeters: driver.distanceMeters,
-      distanceText: driver.distanceText,
-      urgencyLevel: 'unknown', // AI report not generated yet
-      timeoutMs: DRIVER_RESPONSE_TIMEOUT_MS,
-    };
-
-    io?.to(ROOMS.driverRoom(driver.id)).emit(EVENTS.EMERGENCY.CASE_CREATED, payload);
-
-    // Best-effort FCM push (works even if the app is backgrounded). Never blocks dispatch.
-    try {
-      await notificationService?.sendDriverDispatchNotification?.(driver.users?.fcm_token, payload);
-    } catch (err) {
-      logger.warn(`FCM dispatch notify failed: ${err.message}`);
-    }
-  }
-
-  logger.info(`Notified batch ${batchNumber} (${batch.length} drivers) for case ${caseId}`);
-  return batch;
+  return data?.status === 'searching';
 }
 
-// 3. Wait for any driver in the batch to accept (or time out).
-export async function waitForDriverResponse(caseId, batch, timeoutMs) {
+// 2. Offer the case to a single driver.
+export async function notifyDriver(caseId, driver, ringNumber, caseInfo) {
   const io = getIO();
-  const batchIds = batch.map((d) => d.id);
 
-  const acceptedId = await new Promise((resolve) => {
-    let settled = false;
-    const finish = (val) => {
-      if (settled) return;
-      settled = true;
-      clearInterval(interval);
-      clearTimeout(timer);
-      resolve(val);
-    };
-
-    const timer = setTimeout(() => finish(null), timeoutMs);
-
-    const interval = setInterval(async () => {
-      const { data } = await supabaseAdmin
-        .from('case_driver_requests')
-        .select('driver_id, response')
-        .eq('case_id', caseId)
-        .in('driver_id', batchIds);
-
-      const accepted = (data || []).find((r) => r.response === 'accepted');
-      if (accepted) return finish(accepted.driver_id);
-
-      const allDeclined =
-        data && data.length === batchIds.length && data.every((r) => r.response === 'declined');
-      if (allDeclined) return finish(null);
-    }, 2000);
+  await supabaseAdmin.from('case_driver_requests').insert({
+    case_id: caseId,
+    driver_id: driver.id,
+    batch_number: ringNumber,
+    distance_meters: driver.distanceMeters,
+    response: 'pending',
   });
 
-  if (acceptedId) {
-    // Cancel the other drivers in this batch.
-    const losers = batchIds.filter((id) => id !== acceptedId);
-    if (losers.length > 0) {
-      await supabaseAdmin
-        .from('case_driver_requests')
-        .update({ response: 'timeout', responded_at: new Date().toISOString() })
-        .eq('case_id', caseId)
-        .in('driver_id', losers)
-        .eq('response', 'pending');
-      losers.forEach((id) => {
-        io?.to(ROOMS.driverRoom(id)).emit(EVENTS.EMERGENCY.CASE_CANCELLED, {
-          caseId,
-          reason: 'taken_by_other',
-        });
-      });
-    }
+  const payload = {
+    caseId,
+    caseNumber: caseInfo.caseNumber,
+    patientName: caseInfo.patientName,
+    patientLat: caseInfo.patientLat,
+    patientLng: caseInfo.patientLng,
+    distanceMeters: driver.distanceMeters,
+    distanceText: driver.distanceText,
+    urgencyLevel: 'unknown', // AI report not generated yet
+    timeoutMs: DRIVER_RESPONSE_TIMEOUT_MS,
+  };
+
+  io?.to(ROOMS.driverRoom(driver.id)).emit(EVENTS.EMERGENCY.CASE_CREATED, payload);
+
+  // Best-effort FCM push (works even if the app is backgrounded). Never blocks dispatch.
+  try {
+    await notificationService?.sendDriverDispatchNotification?.(driver.users?.fcm_token, payload);
+  } catch (err) {
+    logger.warn(`FCM dispatch notify failed: ${err.message}`);
   }
 
-  return acceptedId;
+  logger.info(
+    `Offered case ${caseId} to driver ${driver.id} (ring ${ringNumber}, ${driver.distanceText})`,
+  );
+}
+
+// 3. Wait for that driver's answer.
+// Resolves 'accepted' | 'declined' | 'timeout' | 'cancelled'.
+export async function waitForDriverDecision(caseId, driverId, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const [{ data: request }, { data: emergencyCase }] = await Promise.all([
+      supabaseAdmin
+        .from('case_driver_requests')
+        .select('response')
+        .eq('case_id', caseId)
+        .eq('driver_id', driverId)
+        .maybeSingle(),
+      supabaseAdmin.from('emergency_cases').select('status').eq('id', caseId).maybeSingle(),
+    ]);
+
+    if (emergencyCase && emergencyCase.status !== 'searching') return 'cancelled';
+    if (request?.response === 'accepted') return 'accepted';
+    // A decline moves straight on to the next driver — no waiting it out.
+    if (request?.response === 'declined') return 'declined';
+
+    await sleep(POLL_INTERVAL_MS);
+  }
+  return 'timeout';
 }
 
 // 4. Assign the accepting driver to the case.
@@ -167,7 +146,7 @@ export async function assignDriver(caseId, driverId) {
 
   const { data: emergencyCase } = await supabaseAdmin
     .from('emergency_cases')
-    .select('patient_id, patient_lat, patient_lng, hospital_id, case_number')
+    .select('patient_id, patient_lat, patient_lng, hospital_id, case_number, trigger_method')
     .eq('id', caseId)
     .maybeSingle();
 
@@ -223,57 +202,87 @@ export async function assignDriver(caseId, driverId) {
 
   io?.to(ROOMS.patientRoom(emergencyCase.patient_id)).emit(EVENTS.EMERGENCY.DRIVER_ASSIGNED, payload);
 
-  if (emergencyCase.hospital_id) {
-    io?.to(ROOMS.hospitalRoom(emergencyCase.hospital_id)).emit(EVENTS.HOSPITAL.HOSPITAL_NEW_CASE, {
-      ...payload,
-      patientLat: emergencyCase.patient_lat,
-      patientLng: emergencyCase.patient_lng,
-    });
+  // Hospitals are NOT told here. For app-triggered SOS the patient confirms (or
+  // changes) the suggested hospital first, and only that choice reaches a
+  // dashboard. SMS and missed-call SOS have no app to confirm from, so they
+  // get the nearest hospital straight away — otherwise no hospital would ever
+  // hear about them.
+  if (emergencyCase.trigger_method && emergencyCase.trigger_method !== 'app_sos') {
+    try {
+      await hospitalAssignment.autoAssignNearestHospital(caseId);
+    } catch (err) {
+      logger.warn(`Auto hospital assignment failed for ${caseId}: ${err.message}`);
+    }
   }
 
   logger.info(`Driver ${driverId} assigned to case ${caseId} (ETA ${eta.durationText})`);
   return payload;
 }
 
-// 5. The full dispatch loop: expand radius until a driver accepts or all fail.
+// 5. The full dispatch loop.
+// For each ring: take the (up to) three nearest drivers not yet asked and offer
+// the case to them one by one. If none accepts, widen the ring and repeat.
 export async function runDispatchCycle(caseId, patientLat, patientLng) {
   const io = getIO();
 
   const { data: caseRow } = await supabaseAdmin
     .from('emergency_cases')
-    .select('patient_id')
+    .select('patient_id, case_number, patient:patient_id(full_name)')
     .eq('id', caseId)
     .maybeSingle();
   const patientId = caseRow?.patient_id;
+  const caseInfo = {
+    caseNumber: caseRow?.case_number,
+    patientName: caseRow?.patient?.full_name || 'Anonymous Patient',
+    patientLat,
+    patientLng,
+  };
 
   await supabaseAdmin.from('emergency_cases').update({ status: 'searching' }).eq('id', caseId);
 
-  for (let attempt = 0; attempt < MAX_DISPATCH_ATTEMPTS; attempt++) {
-    const radius = DISPATCH_RADIUS_STEPS[attempt];
-    logger.info(`Dispatch attempt ${attempt + 1}: radius ${radius}m for case ${caseId}`);
+  for (let ring = 0; ring < DISPATCH_RADIUS_STEPS.length; ring++) {
+    const radius = DISPATCH_RADIUS_STEPS[ring];
 
     const drivers = await findAvailableDrivers(patientLat, patientLng, radius);
-    if (drivers.length === 0) {
-      logger.info(`No drivers found in ${radius}m radius`);
-      continue;
+    const alreadyAsked = await getAlreadyNotifiedDriverIds(caseId);
+    const candidates = drivers
+      .filter((d) => !alreadyAsked.includes(d.id))
+      .slice(0, DRIVERS_PER_RING);
+
+    logger.info(
+      `Dispatch ring ${ring + 1} (${radius}m): ${candidates.length} new driver(s) for case ${caseId}`,
+    );
+
+    for (const driver of candidates) {
+      if (!(await caseStillSearching(caseId))) {
+        logger.info(`Dispatch stopped for case ${caseId}: no longer searching`);
+        return { success: false, reason: 'cancelled' };
+      }
+
+      await notifyDriver(caseId, driver, ring + 1, caseInfo);
+      const decision = await waitForDriverDecision(
+        caseId,
+        driver.id,
+        DRIVER_RESPONSE_TIMEOUT_MS + RESPONSE_GRACE_MS,
+      );
+
+      if (decision === 'accepted') {
+        const result = await assignDriver(caseId, driver.id);
+        return { success: true, ...result };
+      }
+      if (decision === 'cancelled') {
+        logger.info(`Dispatch stopped for case ${caseId}: cancelled while waiting`);
+        return { success: false, reason: 'cancelled' };
+      }
+      if (decision === 'timeout') await markRequestTimedOut(caseId, driver.id);
+      logger.info(`Driver ${driver.id} ${decision} case ${caseId} — trying next`);
     }
-
-    const alreadyNotified = await getAlreadyNotifiedDriverIds(caseId);
-    const freshDrivers = drivers.filter((d) => !alreadyNotified.includes(d.id));
-    if (freshDrivers.length === 0) continue;
-
-    const batch = await notifyDriverBatch(caseId, freshDrivers, attempt + 1);
-    const acceptingDriverId = await waitForDriverResponse(caseId, batch, DRIVER_RESPONSE_TIMEOUT_MS);
-
-    if (acceptingDriverId) {
-      const result = await assignDriver(caseId, acceptingDriverId);
-      return { success: true, ...result };
-    }
-
-    await markBatchAsTimeout(caseId, batch);
   }
 
-  // No driver found across all radii.
+  // A patient who cancelled should not be told "no driver found".
+  if (!(await caseStillSearching(caseId))) return { success: false, reason: 'cancelled' };
+
+  // No driver found across all rings.
   await supabaseAdmin
     .from('emergency_cases')
     .update({ status: 'no_driver_found' })
@@ -292,7 +301,7 @@ export async function runDispatchCycle(caseId, patientLat, patientLng) {
     });
   }
 
-  logger.info(`No driver found for case ${caseId} after ${MAX_DISPATCH_ATTEMPTS} attempts`);
+  logger.info(`No driver found for case ${caseId} across ${DISPATCH_RADIUS_STEPS.length} rings`);
   return { success: false, reason: 'no_driver_found' };
 }
 
@@ -442,11 +451,11 @@ export async function handoffCase({ caseId, currentDriverId, reason }) {
 
 export default {
   findAvailableDrivers,
-  notifyDriverBatch,
-  waitForDriverResponse,
+  notifyDriver,
+  waitForDriverDecision,
   assignDriver,
   runDispatchCycle,
   handoffCase,
   getAlreadyNotifiedDriverIds,
-  markBatchAsTimeout,
+  markRequestTimedOut,
 };
