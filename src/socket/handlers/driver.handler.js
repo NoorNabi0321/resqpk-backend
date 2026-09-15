@@ -60,22 +60,37 @@ export default function driverHandler(io, socket) {
   socket.on(EVENTS.DRIVER.DRIVER_GO_ONLINE, async (data, callback) => {
     try {
       const { lat, lng, heading } = data || {};
-      await supabaseAdmin
+
+      // The app re-sends go_online after every reconnect. A driver already on
+      // a case must stay unavailable, or dispatch would offer them a second one.
+      const { data: activeCase } = await supabaseAdmin
+        .from('emergency_cases')
+        .select('id')
+        .eq('driver_id', driverId)
+        .in('status', ['driver_assigned', 'arrived', 'en_route'])
+        .limit(1)
+        .maybeSingle();
+      const isAvailable = !activeCase;
+
+      const { error } = await supabaseAdmin
         .from('drivers')
         .update({
-          is_available: true,
+          is_available: isAvailable,
           current_lat: lat,
           current_lng: lng,
           heading,
           location_updated_at: new Date().toISOString(),
         })
         .eq('id', driverId);
+      if (error) throw new Error(error.message);
 
-      logger.info(`Driver ${driverId} went online at ${lat},${lng}`);
+      logger.info(
+        `Driver ${driverId} went online at ${lat},${lng}${isAvailable ? '' : ` (on case ${activeCase.id})`}`,
+      );
 
       io.emit(EVENTS.DRIVER.DRIVER_STATUS_CHANGED, {
         driverId,
-        isAvailable: true,
+        isAvailable,
         lat,
         lng,
       });

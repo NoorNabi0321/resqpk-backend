@@ -144,7 +144,10 @@ export async function registerDriver({
         license_number,
         organization,
         is_available: false,
-        is_verified: false,
+        // Verified on sign-up: dispatch only offers cases to verified drivers,
+        // and ResQPK has no admin approval flow, so an unverified driver would
+        // look online but never receive a request.
+        is_verified: true,
       })
       .select()
       .single();
