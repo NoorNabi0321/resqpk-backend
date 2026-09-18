@@ -125,6 +125,40 @@ export async function getDirectionsRoute(originLat, originLng, destLat, destLng)
   }
 }
 
+// 2b. Turn a typed landmark into coordinates (ORS / Pelias geocoder).
+//
+// The fallback when someone cannot share a location pin: "near Civil Hospital
+// gate", "Latifabad No 7". Results are biased towards the caller's city, since
+// place names in Pakistan repeat across provinces.
+export async function geocodeAddress(text, nearLat = 25.396, nearLng = 68.3578) {
+  const query = String(text || '').trim();
+  if (query.length < 3) return null;
+
+  try {
+    const res = await axios.get('https://api.openrouteservice.org/geocode/search', {
+      params: {
+        api_key: config.orsApiKey,
+        text: query,
+        'boundary.circle.lat': nearLat,
+        'boundary.circle.lon': nearLng,
+        'boundary.circle.radius': 50, // km
+        'boundary.country': 'PK',
+        size: 1,
+      },
+      timeout: 8000,
+    });
+
+    const feature = res.data?.features?.[0];
+    if (!feature?.geometry?.coordinates) return null;
+
+    const [lng, lat] = feature.geometry.coordinates;
+    return { lat, lng, label: feature.properties?.label || query };
+  } catch (err) {
+    logger.warn(`Geocoding failed for "${query}": ${err.message}`);
+    return null;
+  }
+}
+
 // 3. Nearest available drivers to a patient (straight-line, fast, no API call).
 export function findNearestDrivers(patientLat, patientLng, availableDrivers, maxCount = 3) {
   return (availableDrivers || [])
@@ -157,6 +191,7 @@ export function findNearestHospital(patientLat, patientLng, hospitals) {
 export default {
   getDistanceAndETA,
   getDirectionsRoute,
+  geocodeAddress,
   haversineDistance,
   findNearestDrivers,
   findNearestHospital,

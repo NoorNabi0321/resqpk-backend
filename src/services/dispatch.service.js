@@ -3,6 +3,7 @@
 // assigns the first driver who accepts.
 import { supabaseAdmin } from '../config/supabase.js';
 import caseTokenService from './case-token.service.js';
+import whatsappNotifier from './whatsapp/notifier.js';
 import config from '../config/env.js';
 import mapsService from './maps.service.js';
 import notificationService from './notification.service.js'; // filled in B4 (best-effort)
@@ -211,6 +212,13 @@ export async function assignDriver(caseId, driverId) {
     : ROOMS.caseRoom(caseId);
   io?.to(patientTarget).emit(EVENTS.EMERGENCY.DRIVER_ASSIGNED, payload);
 
+  // A chat user cannot listen to a socket, so the same news goes to WhatsApp.
+  // No-op for app and web cases.
+  whatsappNotifier.safely(
+    whatsappNotifier.notifyDriverAssigned(caseId, payload),
+    'driver assigned',
+  );
+
   // Hospitals are NOT told here. The patient confirms (or changes) the
   // suggested hospital first, and only that choice reaches a dashboard.
 
@@ -300,6 +308,8 @@ export async function runDispatchCycle(caseId, patientLat, patientLng) {
       ],
     });
   }
+
+  whatsappNotifier.safely(whatsappNotifier.notifyNoDriver(caseId), 'no driver found');
 
   logger.info(`No driver found for case ${caseId} across ${DISPATCH_RADIUS_STEPS.length} rings`);
   return { success: false, reason: 'no_driver_found' };

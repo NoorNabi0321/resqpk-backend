@@ -5,6 +5,7 @@ import dispatchService from './dispatch.service.js';
 import mapsService from './maps.service.js';
 import hospitalAssignment from './hospital-assignment.service.js';
 import caseTokenService from './case-token.service.js';
+import whatsappNotifier from './whatsapp/notifier.js';
 import { getIO } from '../socket/socket.server.js';
 import { EVENTS, ROOMS } from '../socket/socket.events.js';
 import logger from '../middleware/logger.js';
@@ -191,6 +192,9 @@ export async function updateCaseStatus({ caseId, driverId, status }) {
   if (status === 'completed') {
     await supabaseAdmin.from('drivers').update({ is_available: true }).eq('id', driverId);
   }
+
+  // Ride milestones reach a chat user as messages, not socket events.
+  whatsappNotifier.safely(whatsappNotifier.notifyStatus(caseId, status), `status ${status}`);
 
   const eventByStatus = {
     arrived: EVENTS.EMERGENCY.DRIVER_ARRIVED,

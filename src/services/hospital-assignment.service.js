@@ -9,6 +9,7 @@
 // a different one, and the automatic fallback for a patient who never answered.
 import { supabaseAdmin } from '../config/supabase.js';
 import mapsService from './maps.service.js';
+import whatsappNotifier from './whatsapp/notifier.js';
 import { getIO } from '../socket/socket.server.js';
 import { EVENTS, ROOMS } from '../socket/socket.events.js';
 import logger from '../middleware/logger.js';
@@ -87,6 +88,9 @@ export async function assignHospitalToCase({ caseId, hospitalId, source = 'patie
     })
     .eq('id', caseId);
   if (error) throw new Error(error.message);
+
+  // A WhatsApp reporter learns the destination in the thread.
+  whatsappNotifier.safely(whatsappNotifier.notifyHospital(caseId, hospital.name), 'hospital');
 
   // Patient + driver apps: new destination (both already handle this event).
   emit(ROOMS.caseRoom(caseId), EVENTS.EMERGENCY.HOSPITAL_CHANGED, summary);

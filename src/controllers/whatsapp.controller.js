@@ -5,6 +5,7 @@
 // and the dispatch adapter land next (§6 of ResQPK_System_Replan.md).
 import config from '../config/env.js';
 import whatsapp from '../services/whatsapp/whatsapp.client.js';
+import stateMachine from '../services/whatsapp/state-machine.js';
 import logger from '../middleware/logger.js';
 
 // Meta retries a webhook it considers failed, and retries carry the same
@@ -65,19 +66,11 @@ async function handleMessage(message, contact) {
   const name = contact?.profile?.name || 'unknown';
   logger.info(`WhatsApp inbound from ${from} (${name}): ${describe(message)}`);
 
+  // Blue ticks first: it tells a frightened sender the system is alive, before
+  // any processing that might take a second or two.
   await whatsapp.markAsRead(message.id);
 
-  // Stage 1 echo. Replaced by the state machine in the next step.
-  if (message.type === 'text') {
-    const body = (message.text?.body || '').trim();
-    await whatsapp.sendText(
-      from,
-      `ResQPK received: "${body}"\n\nThe emergency flow is not connected yet — this is a channel test.`,
-    );
-  } else if (message.type === 'location') {
-    const { latitude, longitude } = message.location || {};
-    await whatsapp.sendText(from, `Location received: ${latitude}, ${longitude}`);
-  }
+  await stateMachine.handleInbound(message, contact);
 }
 
 // POST /api/whatsapp/webhook — inbound messages and delivery statuses.
