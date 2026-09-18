@@ -1,6 +1,6 @@
 // Module 6 — AI report routes.
 import express from 'express';
-import { authenticate, requireRole } from '../middleware/auth.js';
+import caseAuth from '../middleware/case-auth.js';
 import {
   uploadMiddleware,
   generateReport,
@@ -10,12 +10,14 @@ import {
 
 const router = express.Router();
 
-// Patient generates an AI report (multipart voice/image/text).
-router.post('/report', authenticate, requireRole('patient'), uploadMiddleware, generateReport);
+// Generate a report from voice, text or photos (multipart).
+// caseAuth accepts a case token — a WhatsApp or web reporter has no account —
+// or a normal user JWT. The controllers decide what each principal may touch.
+router.post('/report', caseAuth, uploadMiddleware, generateReport);
 
-// Patient (own case) or hospital admin (their hospital) reads the report.
+// The reporter (by token or account) or the receiving hospital reads it.
 // The /pdf variant is declared first so it isn't captured by :caseId.
-router.get('/report/:caseId/pdf', authenticate, getReportPdf);
-router.get('/report/:caseId', authenticate, getReport);
+router.get('/report/:caseId/pdf', caseAuth, getReportPdf);
+router.get('/report/:caseId', caseAuth, getReport);
 
 export default router;

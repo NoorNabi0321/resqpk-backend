@@ -35,10 +35,14 @@ app.use(helmet());
 // Render URL. Any origin set via FRONTEND_URL is also allowed.
 const allowedOrigins = [
   config.frontendUrl,
+  // The public web app — tracking links and zero-install SOS. Often a second
+  // Vercel project on its own domain, so it is not covered by frontendUrl.
+  config.publicWebUrl,
   'http://localhost:5173', // React dev
+  'http://localhost:4173', // vite preview of the production build
   'http://localhost:3000', // local backend test
   'https://resqpk-backend.onrender.com', // production (Render)
-];
+].filter(Boolean);
 app.use(
   cors({
     origin(origin, callback) {

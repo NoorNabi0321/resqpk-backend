@@ -27,14 +27,21 @@ export async function generateReport(req, res) {
   const caseId = req.body.case_id;
   if (!caseId) return errorResponse(res, 'case_id is required', 400);
 
-  // Verify the case belongs to this patient and is still active.
   const { data: emergencyCase } = await supabaseAdmin
     .from('emergency_cases')
     .select('id, patient_id, status')
     .eq('id', caseId)
-    .eq('patient_id', req.user.id)
     .maybeSingle();
   if (!emergencyCase) return errorResponse(res, 'Case not found', 404);
+
+  // A case token proves access to this case and nothing else; an account holder
+  // must own the case. Either way the report is attached to the case's patient,
+  // which is null for an anonymous reporter.
+  const viaCaseToken = req.caseAccess?.caseId === caseId;
+  const isOwner = req.user?.role === 'patient' && emergencyCase.patient_id === req.user.id;
+  if (!viaCaseToken && !isOwner) {
+    return errorResponse(res, 'Not authorized to add details to this case', 403);
+  }
   if (['completed', 'cancelled'].includes(emergencyCase.status)) {
     return errorResponse(res, 'Case is no longer active', 400);
   }
@@ -53,7 +60,7 @@ export async function generateReport(req, res) {
   }
 
   try {
-    const result = await aiPipeline.processAIReport(caseId, req.user.id, {
+    const result = await aiPipeline.processAIReport(caseId, emergencyCase.patient_id || null, {
       voiceNoteBuffer,
       voiceNoteMimeType,
       userText,
@@ -78,9 +85,11 @@ export async function getReport(req, res) {
   if (!report) return errorResponse(res, 'Report not found', 404);
 
   const ec = report.emergency_cases;
-  const isOwnerPatient = req.user.role === 'patient' && ec.patient_id === req.user.id;
-  const isHospitalAdmin = req.user.role === 'hospital_admin' && ec.hospital_id === req.user.hospital_id;
-  if (!isOwnerPatient && !isHospitalAdmin) {
+  const viaCaseToken = req.caseAccess?.caseId === caseId;
+  const isOwnerPatient = req.user?.role === 'patient' && ec.patient_id === req.user.id;
+  const isHospitalAdmin =
+    req.user?.role === 'hospital_admin' && ec.hospital_id === req.user.hospital_id;
+  if (!viaCaseToken && !isOwnerPatient && !isHospitalAdmin) {
     return errorResponse(res, 'Not authorized to view this report', 403);
   }
 
@@ -101,10 +110,11 @@ export async function getReportPdf(req, res) {
   if (!report) return errorResponse(res, 'Report not found', 404);
 
   const ec = report.emergency_cases;
-  const isOwnerPatient = req.user.role === 'patient' && ec.patient_id === req.user.id;
+  const viaCaseToken = req.caseAccess?.caseId === caseId;
+  const isOwnerPatient = req.user?.role === 'patient' && ec.patient_id === req.user.id;
   const isHospitalAdmin =
-    req.user.role === 'hospital_admin' && ec.hospital_id === req.user.hospital_id;
-  if (!isOwnerPatient && !isHospitalAdmin) {
+    req.user?.role === 'hospital_admin' && ec.hospital_id === req.user.hospital_id;
+  if (!viaCaseToken && !isOwnerPatient && !isHospitalAdmin) {
     return errorResponse(res, 'Not authorized to view this report', 403);
   }
 
