@@ -24,6 +24,26 @@ export function authenticate(req, res, next) {
   }
 }
 
+// Attaches req.user when a valid token is present, and continues regardless.
+//
+// Used by SOS triggering: a signed-in patient gets their medical profile and
+// history attached to the case, while someone with no account still gets an
+// ambulance. Never ask a person in an emergency to log in first.
+export function optionalAuth(req, res, next) {
+  const header = req.headers.authorization || '';
+  const [scheme, token] = header.split(' ');
+
+  if (scheme === 'Bearer' && token) {
+    try {
+      req.user = jwt.verify(token, config.jwtSecret);
+    } catch {
+      // An expired or malformed token must not block an emergency.
+      req.user = null;
+    }
+  }
+  return next();
+}
+
 // Factory: returns middleware that allows only the given roles.
 // Usage: router.get('/x', authenticate, requireRole('driver', 'hospital_admin'), handler)
 export function requireRole(...roles) {
@@ -35,4 +55,4 @@ export function requireRole(...roles) {
   };
 }
 
-export default { authenticate, requireRole, ROLES };
+export default { authenticate, optionalAuth, requireRole, ROLES };

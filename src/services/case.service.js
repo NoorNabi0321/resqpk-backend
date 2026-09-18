@@ -4,6 +4,7 @@ import { supabaseAdmin } from '../config/supabase.js';
 import dispatchService from './dispatch.service.js';
 import mapsService from './maps.service.js';
 import hospitalAssignment from './hospital-assignment.service.js';
+import caseTokenService from './case-token.service.js';
 import { getIO } from '../socket/socket.server.js';
 import { EVENTS, ROOMS } from '../socket/socket.events.js';
 import logger from '../middleware/logger.js';
@@ -13,7 +14,17 @@ import logger from '../middleware/logger.js';
 // No hospital is attached here. A hospital only sees a case once an ambulance
 // has accepted AND the patient has confirmed (or changed) the suggested
 // hospital — so dashboards never list requests nobody is responding to.
-export async function createSOS({ patientId, lat, lng, accuracy, address }) {
+export async function createSOS({
+  patientId = null,
+  lat,
+  lng,
+  accuracy,
+  address,
+  reporterPhone = null,
+  reporterName = null,
+  reportedFor = 'self',
+  channel = 'app',
+}) {
   // Nearest emergency-capable hospital — returned only as a suggestion.
   const { data: hospitals } = await supabaseAdmin
     .from('hospitals')
@@ -22,22 +33,46 @@ export async function createSOS({ patientId, lat, lng, accuracy, address }) {
     .eq('is_active', true);
   const nearestHospital = mapsService.findNearestHospital(lat, lng, hospitals || []);
 
-  const { data: created, error } = await supabaseAdmin
-    .from('emergency_cases')
-    .insert({
-      patient_id: patientId,
-      patient_lat: lat,
-      patient_lng: lng,
-      patient_address: address || null,
-      hospital_id: null,
-      status: 'pending',
-      trigger_method: 'app_sos',
-      sos_triggered_at: new Date().toISOString(),
-    })
-    .select('id, case_number')
-    .single();
+  // The tracking link is issued now rather than on driver assignment: a
+  // WhatsApp or web reporter needs something to watch while the search runs.
+  const shareToken = caseTokenService.generateShareToken();
 
-  if (error) throw new Error(error.message);
+  let created = null;
+  let lastError = null;
+  for (let attempt = 0; attempt < 3 && !created; attempt += 1) {
+    const { data, error } = await supabaseAdmin
+      .from('emergency_cases')
+      .insert({
+        patient_id: patientId,
+        patient_lat: lat,
+        patient_lng: lng,
+        patient_address: address || null,
+        hospital_id: null,
+        status: 'pending',
+        trigger_method: 'app_sos',
+        channel,
+        reported_for: reportedFor,
+        reporter_phone: reporterPhone,
+        reporter_name: reporterName,
+        access_code: caseTokenService.generateAccessCode(),
+        share_token: shareToken,
+        share_token_expires_at: caseTokenService.shareTokenExpiry(),
+        sos_triggered_at: new Date().toISOString(),
+      })
+      .select('id, case_number, access_code')
+      .single();
+
+    if (!error) {
+      created = data;
+      break;
+    }
+    lastError = error;
+    // 23505 is a unique violation: retry with a fresh code. Anything else is a
+    // real failure and retrying would only delay the ambulance.
+    if (error.code !== '23505') break;
+  }
+
+  if (!created) throw new Error(lastError?.message || 'Could not create emergency case');
 
   // Run the dispatch loop in the background — return to the patient immediately.
   dispatchService
@@ -47,6 +82,13 @@ export async function createSOS({ patientId, lat, lng, accuracy, address }) {
   return {
     caseId: created.id,
     caseNumber: created.case_number,
+    // How an anonymous reporter reaches this case again: the code to type, the
+    // token their client holds, and the link to open or forward.
+    accessCode: created.access_code,
+    caseToken: caseTokenService.issueCaseToken({ caseId: created.id, channel }),
+    trackingUrl: caseTokenService.trackingUrl(shareToken),
+    channel,
+    reportedFor,
     status: 'searching',
     // The patient app builds its tracking map from this response; without the
     // coordinates it placed the patient marker at 0,0.
@@ -169,14 +211,18 @@ export async function updateCaseStatus({ caseId, driverId, status }) {
 }
 
 // 4. Patient cancels before the trip is underway.
-export async function cancelSOS({ caseId, patientId, reason = 'false_alarm' }) {
+export async function cancelSOS({ caseId, patientId = null, viaCaseToken = false, reason = 'false_alarm' }) {
   const { data: emergencyCase } = await supabaseAdmin
     .from('emergency_cases')
     .select('id, status, driver_id, patient_id')
     .eq('id', caseId)
     .maybeSingle();
   if (!emergencyCase) throw new Error('Case not found');
-  if (emergencyCase.patient_id !== patientId) throw new Error('Not your case');
+  // A case token was already matched against this case id by the middleware,
+  // and its holder may have no account to compare against.
+  if (!viaCaseToken && emergencyCase.patient_id !== patientId) {
+    throw new Error('Not your case');
+  }
 
   const cancellable = ['pending', 'searching', 'driver_assigned'];
   if (!cancellable.includes(emergencyCase.status)) {
@@ -230,18 +276,58 @@ export async function getCaseDetails(caseId, requestingUser) {
   // Accept a plain id for older callers as well as the full req.user object.
   const user = typeof requestingUser === 'string' ? { id: requestingUser } : requestingUser || {};
 
-  const isPatient = emergencyCase.patient_id === user.id;
-  const isDriver = emergencyCase.driver?.user_id === user.id;
+  // A case token already proves access to this one case — that is its entire
+  // purpose, and its holder may have no account at all.
+  const hasCaseToken = user.caseScopedCaseId === caseId;
+  const isPatient = !!user.id && emergencyCase.patient_id === user.id;
+  const isDriver = !!user.id && emergencyCase.driver?.user_id === user.id;
   const isHospitalAdmin =
     user.role === 'hospital_admin' &&
     !!user.hospital_id &&
     emergencyCase.hospital_id === user.hospital_id;
 
-  if (!isPatient && !isDriver && !isHospitalAdmin) {
+  if (!hasCaseToken && !isPatient && !isDriver && !isHospitalAdmin) {
     throw new Error('Not authorized to view this case');
   }
 
   return emergencyCase;
+}
+
+// 6z. Attach an anonymous case to an account, using the code the reporter kept.
+//
+// This is the only path from "I needed help and had no account" to "this is in
+// my history" — the account is offered after the emergency, never before it.
+export async function claimCaseByAccessCode({ accessCode, patientId }) {
+  const found = await caseTokenService.caseFromAccessCode(accessCode);
+  if (!found) throw new Error('No request found for that code');
+
+  const { data: existing } = await supabaseAdmin
+    .from('emergency_cases')
+    .select('id, patient_id')
+    .eq('id', found.id)
+    .maybeSingle();
+
+  if (existing?.patient_id && existing.patient_id !== patientId) {
+    throw new Error('This request is already linked to another account');
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from('emergency_cases')
+    .update({ patient_id: patientId })
+    .eq('id', found.id)
+    .select('id, case_number, status')
+    .single();
+  if (error) throw new Error(error.message);
+
+  // The report carries its own patient_id, which history queries filter on.
+  await supabaseAdmin
+    .from('ai_reports')
+    .update({ patient_id: patientId })
+    .eq('case_id', found.id)
+    .is('patient_id', null);
+
+  logger.info(`Case ${data.case_number} claimed by user ${patientId}`);
+  return { caseId: data.id, caseNumber: data.case_number, status: data.status };
 }
 
 // 6a. The caller's currently-running case, if any. Lets the apps resume where
@@ -281,7 +367,11 @@ export async function getMyActiveCase(user) {
 // driver_assigned  → driver's live position → patient (pickup leg)
 // arrived          → patient → hospital (preview of the drop-off leg)
 // en_route         → driver's live position → hospital (drop-off leg)
-export async function getCaseRoute(caseId, requestingUserId) {
+export async function getCaseRoute(caseId, requester) {
+  // Accepts a plain user id (older callers), a req.user object, or the
+  // case-token shape produced by case-auth middleware.
+  const user = typeof requester === 'string' ? { id: requester } : requester || {};
+  const requestingUserId = user.id;
   const { data: emergencyCase } = await supabaseAdmin
     .from('emergency_cases')
     .select(
@@ -293,9 +383,12 @@ export async function getCaseRoute(caseId, requestingUserId) {
     .maybeSingle();
   if (!emergencyCase) throw new Error('Case not found');
 
-  const isPatient = emergencyCase.patient_id === requestingUserId;
-  const isDriver = emergencyCase.driver?.user_id === requestingUserId;
-  if (!isPatient && !isDriver) throw new Error('Not authorized to view this case');
+  const hasCaseToken = user.caseScopedCaseId === caseId;
+  const isPatient = !!requestingUserId && emergencyCase.patient_id === requestingUserId;
+  const isDriver = !!requestingUserId && emergencyCase.driver?.user_id === requestingUserId;
+  if (!hasCaseToken && !isPatient && !isDriver) {
+    throw new Error('Not authorized to view this case');
+  }
 
   const patient = { lat: Number(emergencyCase.patient_lat), lng: Number(emergencyCase.patient_lng) };
   const driver =
@@ -535,6 +628,7 @@ export default {
   listNearbyHospitals,
   changeCaseHospital,
   getShareTrackingData,
+  claimCaseByAccessCode,
   listHospitalCases,
   updateHospitalBeds,
 };

@@ -1,9 +1,8 @@
 // Core dispatch engine: offers the case to the nearest drivers ONE AT A TIME,
 // three per search ring, widens the radius when a ring is exhausted, and
 // assigns the first driver who accepts.
-import crypto from 'crypto';
-
 import { supabaseAdmin } from '../config/supabase.js';
+import caseTokenService from './case-token.service.js';
 import config from '../config/env.js';
 import mapsService from './maps.service.js';
 import notificationService from './notification.service.js'; // filled in B4 (best-effort)
@@ -145,7 +144,9 @@ export async function assignDriver(caseId, driverId) {
 
   const { data: emergencyCase } = await supabaseAdmin
     .from('emergency_cases')
-    .select('patient_id, patient_lat, patient_lng, hospital_id, case_number')
+    .select(
+      'patient_id, patient_lat, patient_lng, hospital_id, case_number, share_token, share_token_expires_at',
+    )
     .eq('id', caseId)
     .maybeSingle();
 
@@ -160,8 +161,12 @@ export async function assignDriver(caseId, driverId) {
     Number(emergencyCase.patient_lng),
   );
 
-  const shareToken = crypto.randomBytes(32).toString('hex');
-  const shareTokenExpiresAt = new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString();
+  // The tracking link is issued when the case is created, so by now it may
+  // already be on the patient's screen or in a WhatsApp thread. Minting a new
+  // one here would silently break the link they are watching.
+  const shareToken = emergencyCase.share_token || caseTokenService.generateShareToken();
+  const shareTokenExpiresAt =
+    emergencyCase.share_token_expires_at || caseTokenService.shareTokenExpiry();
 
   await supabaseAdmin
     .from('emergency_cases')
@@ -199,7 +204,12 @@ export async function assignDriver(caseId, driverId) {
     shareUrl: `${config.frontendUrl}/track/${shareToken}`,
   };
 
-  io?.to(ROOMS.patientRoom(emergencyCase.patient_id)).emit(EVENTS.EMERGENCY.DRIVER_ASSIGNED, payload);
+  // An anonymous reporter has no personal room — their app, web page or
+  // WhatsApp link watches the case room instead.
+  const patientTarget = emergencyCase.patient_id
+    ? ROOMS.patientRoom(emergencyCase.patient_id)
+    : ROOMS.caseRoom(caseId);
+  io?.to(patientTarget).emit(EVENTS.EMERGENCY.DRIVER_ASSIGNED, payload);
 
   // Hospitals are NOT told here. The patient confirms (or changes) the
   // suggested hospital first, and only that choice reaches a dashboard.
@@ -277,8 +287,9 @@ export async function runDispatchCycle(caseId, patientLat, patientLng) {
     .update({ status: 'no_driver_found' })
     .eq('id', caseId);
 
-  if (patientId) {
-    io?.to(ROOMS.patientRoom(patientId)).emit(EVENTS.EMERGENCY.NO_DRIVER_FOUND, {
+  {
+    const target = patientId ? ROOMS.patientRoom(patientId) : ROOMS.caseRoom(caseId);
+    io?.to(target).emit(EVENTS.EMERGENCY.NO_DRIVER_FOUND, {
       caseId,
       message: 'No ambulance available. Please call 1122, Edhi (115), or Chhipa (1020).',
       emergencyNumbers: [

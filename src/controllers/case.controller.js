@@ -1,6 +1,12 @@
 import caseService from '../services/case.service.js';
 import dispatchService from '../services/dispatch.service.js';
-import { driverRespondSchema, updateCaseStatusSchema, validate } from '../validators/sos.validator.js';
+import caseTokenService from '../services/case-token.service.js';
+import {
+  driverRespondSchema,
+  updateCaseStatusSchema,
+  accessCodeSchema,
+  validate,
+} from '../validators/sos.validator.js';
 import { successResponse, errorResponse } from '../utils/response.js';
 
 // POST /api/cases/respond (driver)
@@ -76,7 +82,9 @@ export async function getCaseDetails(req, res) {
 // GET /api/cases/:id/route (patient or assigned driver — road geometry for the current leg)
 export async function getCaseRoute(req, res) {
   try {
-    const data = await caseService.getCaseRoute(req.params.id, req.user.id);
+    // Pass the whole principal, not just an id: a case-token holder has no user
+    // id, and the service authorises on the scoped case id instead.
+    const data = await caseService.getCaseRoute(req.params.id, req.user);
     return successResponse(res, data, 'Case route', 200);
   } catch (err) {
     const code = err.message.includes('authorized') ? 403 : 404;
@@ -153,12 +161,77 @@ export async function updateBeds(req, res) {
   }
 }
 
-// GET /api/cases/track/:token (public — family tracking)
+// GET /api/cases/track/:token (public — tracking link, no account)
+//
+// Returns the tracking snapshot plus a case token, so the web page can then
+// open a socket and fetch the route without ever asking anyone to sign in.
 export async function getShareTracking(req, res) {
   try {
     const data = await caseService.getShareTrackingData(req.params.token);
-    return successResponse(res, data, 'Tracking data', 200);
+    const found = await caseTokenService.caseFromShareToken(req.params.token);
+    if (!found) return errorResponse(res, 'This tracking link has expired', 404);
+
+    return successResponse(
+      res,
+      {
+        ...data,
+        caseId: found.id,
+        caseToken: caseTokenService.issueCaseToken({
+          caseId: found.id,
+          channel: found.channel,
+        }),
+      },
+      'Tracking data',
+      200,
+    );
   } catch (err) {
     return errorResponse(res, err.message, 404);
+  }
+}
+
+// POST /api/cases/lookup (public, rate-limited) — access code → case token.
+export async function lookupByAccessCode(req, res) {
+  const { error, value } = validate(accessCodeSchema, req.body);
+  if (error) return errorResponse(res, 'Validation failed', 400, error);
+
+  try {
+    const found = await caseTokenService.caseFromAccessCode(value.accessCode);
+    // One message for "wrong format", "no such code" and "expired": anything
+    // more specific helps someone guessing codes.
+    if (!found) return errorResponse(res, 'No request found for that code', 404);
+
+    return successResponse(
+      res,
+      {
+        caseId: found.id,
+        caseNumber: found.case_number,
+        status: found.status,
+        caseToken: caseTokenService.issueCaseToken({
+          caseId: found.id,
+          channel: found.channel,
+        }),
+      },
+      'Request found',
+      200,
+    );
+  } catch (err) {
+    return errorResponse(res, err.message, 400);
+  }
+}
+
+// POST /api/cases/claim (patient) — attach an anonymous case to this account.
+export async function claimCase(req, res) {
+  const { error, value } = validate(accessCodeSchema, req.body);
+  if (error) return errorResponse(res, 'Validation failed', 400, error);
+
+  try {
+    const data = await caseService.claimCaseByAccessCode({
+      accessCode: value.accessCode,
+      patientId: req.user.id,
+    });
+    return successResponse(res, data, 'Request added to your account', 200);
+  } catch (err) {
+    const code = err.message.includes('already linked') ? 409 : 404;
+    return errorResponse(res, err.message, code);
   }
 }

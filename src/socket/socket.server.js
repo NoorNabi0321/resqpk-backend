@@ -8,6 +8,7 @@ import driverHandler from './handlers/driver.handler.js';
 import patientHandler from './handlers/patient.handler.js';
 import hospitalHandler from './handlers/hospital.handler.js';
 import { supabaseAdmin } from '../config/supabase.js';
+import { verifyCaseToken } from '../services/case-token.service.js';
 import logger from '../middleware/logger.js';
 
 let _io = null;
@@ -38,6 +39,16 @@ export function initializeSocketServer(httpServer) {
     }
     if (!token) return next(new Error('Authentication token required'));
 
+    // A case token belongs to no user: it authorises exactly one case. This is
+    // how an anonymous patient, a WhatsApp reporter or someone holding a
+    // tracking link receives live updates without an account.
+    const casePayload = verifyCaseToken(token);
+    if (casePayload) {
+      socket.role = 'case';
+      socket.caseId = casePayload.case_id;
+      return next();
+    }
+
     try {
       const decoded = jwt.verify(token, config.jwtSecret);
       socket.userId = decoded.id;
@@ -56,6 +67,18 @@ export function initializeSocketServer(httpServer) {
     logger.info(
       `Socket connected: ${socket.id} | Role: ${socket.role} | User: ${socket.userId}`,
     );
+
+    // Case-scoped connection: one room, no personal room, no role handlers.
+    if (socket.role === 'case') {
+      socket.join(ROOMS.caseRoom(socket.caseId));
+      socket.emit(EVENTS.CONNECTION.AUTHENTICATED, {
+        role: 'case',
+        caseId: socket.caseId,
+        socketId: socket.id,
+      });
+      logger.info(`Case-scoped socket joined case ${socket.caseId}`);
+      return;
+    }
 
     // Personal per-user room (named patient:<userId> for all roles).
     socket.join(ROOMS.patientRoom(socket.userId));
