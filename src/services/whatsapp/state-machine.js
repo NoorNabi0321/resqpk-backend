@@ -7,7 +7,9 @@ import { supabaseAdmin } from '../../config/supabase.js';
 import caseService from '../case.service.js';
 import mapsService from '../maps.service.js';
 import logger from '../../middleware/logger.js';
+import aiPipeline from '../ai/ai.pipeline.js';
 import client from './whatsapp.client.js';
+import media from './media.js';
 import { STATES, getSession, saveSession, clearSession } from './session.store.js';
 import { detectTrigger, isCancel, t } from './messages.js';
 
@@ -166,6 +168,76 @@ async function dispatchCase(phone, session) {
   return result;
 }
 
+/**
+ * A voice note, photo or typed description during an active case becomes the
+ * AI patient overview — the same pipeline the app uses. This is the point of
+ * the whole channel: a bystander who installed nothing gives the hospital a
+ * structured clinical summary before the ambulance arrives.
+ */
+async function submitClinicalInput(phone, session, { kind, mediaId, text }) {
+  const copy = t(session.language);
+  const caseId = session.case_id;
+
+  await client.sendText(phone, copy.reportReceived);
+
+  // Detached on purpose: transcription plus the model takes tens of seconds,
+  // and this number's queue must stay free for a CANCEL arriving meanwhile.
+  void (async () => {
+    try {
+      const { data: row } = await supabaseAdmin
+        .from('emergency_cases')
+        .select('patient_id, case_number')
+        .eq('id', caseId)
+        .maybeSingle();
+
+      const inputs = { inputLanguage: 'auto' };
+
+      if (kind === 'audio' || kind === 'image') {
+        const file = await media.downloadMedia(mediaId);
+        if (!file) return client.sendText(phone, copy.reportFailed);
+        if (kind === 'audio') {
+          inputs.voiceNoteBuffer = file.buffer;
+          inputs.voiceNoteMimeType = file.mimeType;
+        } else {
+          inputs.imageBuffers = [{ buffer: file.buffer, mimeType: file.mimeType }];
+        }
+      } else {
+        inputs.userText = text;
+      }
+
+      const result = await aiPipeline.processAIReport(caseId, row?.patient_id || null, inputs);
+
+      await client.sendText(
+        phone,
+        copy.reportReady({
+          urgency: result.urgencyLevel,
+          type: result.emergencyType,
+          firstAid: result.firstAidSuggestion,
+        }),
+      );
+
+      if (result.pdfUrl) {
+        await client.sendDocument(
+          phone,
+          result.pdfUrl,
+          `${row?.case_number || 'ResQPK'}-report.pdf`,
+          'Patient report — also sent to the hospital',
+        );
+      }
+
+      logger.info(
+        `WhatsApp ${kind} → report for ${row?.case_number} (${result.urgencyLevel}, ${result.generationTimeMs}ms)`,
+      );
+      return null;
+    } catch (err) {
+      logger.error(`WhatsApp report generation failed for ${caseId}: ${err.message}`);
+      return client.sendText(phone, copy.reportFailed).catch(() => {});
+    }
+  })();
+
+  return null;
+}
+
 async function cancelFlow(phone, session) {
   const copy = t(session.language);
   if (session.case_id) {
@@ -196,11 +268,10 @@ async function processInbound(message, contact) {
     return cancelFlow(phone, session);
   }
 
-  // A voice note or photo during an active case feeds the AI report. The
-  // pipeline is wired in the next step; for now it is acknowledged, not lost.
-  if ((input.kind === 'audio' || input.kind === 'image') && session.case_id) {
-    logger.info(`WhatsApp media ${input.mediaId} received for case ${session.case_id}`);
-    return client.sendText(phone, 'Received. This will be added to the patient report.');
+  // A voice note or photo during an active case feeds the AI patient overview.
+  if (input.kind === 'audio' || input.kind === 'image') {
+    if (!session.case_id) return client.sendText(phone, copy.unknown);
+    return submitClinicalInput(phone, session, { kind: input.kind, mediaId: input.mediaId });
   }
 
   switch (session.state) {
@@ -275,6 +346,12 @@ async function processInbound(message, contact) {
       // A new location mid-case is a correction worth keeping in the log.
       if (input.kind === 'location') {
         logger.info(`WhatsApp location update during case ${session.case_id}`);
+        return client.sendText(phone, copy.voicePrompt);
+      }
+      // Someone typing during an active case is describing the patient, not
+      // chatting. Treat it as the text input to the report.
+      if (session.case_id && input.kind === 'text' && (input.text || '').length >= 4) {
+        return submitClinicalInput(phone, session, { kind: 'text', text: input.text });
       }
       return client.sendText(phone, copy.voicePrompt);
     }

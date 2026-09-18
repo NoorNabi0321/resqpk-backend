@@ -153,7 +153,11 @@ export async function processAIReport(caseId, patientId, inputs) {
           resources_needed: reportData.resources_needed,
           raw_gpt_response: reportData.rawGptResponse,
           medical_profile_snapshot: medicalProfile || null,
-          generation_status: 'completed',
+          // Still 'processing': the apps and the dashboard gate their result
+          // screen on this status, and the PDF is attached below. Marking the
+          // report complete before its PDF exists is what made "View full
+          // report" open nothing.
+          generation_status: 'processing',
           generation_time_ms: totalTimeMs,
           sent_to_hospital_at: new Date().toISOString(),
         },
@@ -205,17 +209,24 @@ export async function processAIReport(caseId, patientId, inputs) {
         medicalProfile,
       );
 
-      const { error: pdfSaveError } = await supabaseAdmin
-        .from('ai_reports')
-        .update({
-          pdf_url: pdfResult.signedUrl,
-          pdf_storage_path: pdfResult.storagePath,
-        })
-        .eq('case_id', caseId);
-      if (pdfSaveError) throw new Error(pdfSaveError.message);
     } catch (pdfError) {
       pdfResult = null;
       logger.error(`PDF generation failed for case ${caseId}: ${pdfError.message}`);
+    }
+
+    // Completed means finished: the PDF is attached, or it definitively failed
+    // and there will not be one. Either way the status and the URL land in a
+    // single write, so a client that sees 'completed' sees the final answer.
+    const { error: finaliseError } = await supabaseAdmin
+      .from('ai_reports')
+      .update({
+        generation_status: 'completed',
+        pdf_url: pdfResult?.signedUrl || null,
+        pdf_storage_path: pdfResult?.storagePath || null,
+      })
+      .eq('case_id', caseId);
+    if (finaliseError) {
+      logger.error(`Finalising report failed for case ${caseId}: ${finaliseError.message}`);
     }
 
     // STEP 9 — broadcast.
@@ -248,12 +259,16 @@ export async function processAIReport(caseId, patientId, inputs) {
     if (caseRow?.hospital_id) {
       emit(ROOMS.hospitalRoom(caseRow.hospital_id), EVENTS.HOSPITAL.HOSPITAL_CASE_UPDATE, hospitalPayload);
     }
-    emit(ROOMS.patientRoom(patientId), 'ai:report_ready', {
+    const readyPayload = {
       caseId,
       firstAidSuggestion: reportData.first_aid_suggestion,
       urgencyLevel: reportData.urgency_level,
       generationTimeMs: totalTimeMs,
-    });
+    };
+    // An anonymous reporter has no personal room — their client watches the
+    // case room instead.
+    if (patientId) emit(ROOMS.patientRoom(patientId), 'ai:report_ready', readyPayload);
+    else emit(ROOMS.caseRoom(caseId), 'ai:report_ready', readyPayload);
 
     // STEP 10 — return.
     return {

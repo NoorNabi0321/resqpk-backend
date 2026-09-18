@@ -65,6 +65,11 @@ const copy = {
     unknown: 'Send *SOS* to request an ambulance.',
     voicePrompt:
       'You can send a voice note describing the situation — what happened, is the patient conscious, any bleeding. The hospital will receive it before the ambulance arrives.',
+    reportReceived: 'Received. Preparing the patient report — this takes about a minute.',
+    reportReady: (r) =>
+      `📋 Patient report ready\n\nUrgency: *${r.urgency || 'not assessed'}*\n${r.type || ''}\n\n${r.firstAid ? `While you wait: ${r.firstAid}\n\n` : ''}The hospital has received this.`,
+    reportFailed:
+      'Could not process that. Try typing what happened instead — what is wrong, is the patient conscious, any bleeding.',
   },
 
   ur: {
@@ -97,6 +102,11 @@ const copy = {
     unknown: 'ایمبولینس کے لیے *SOS* بھیجیں۔',
     voicePrompt:
       'صورتحال بتانے کے لیے وائس نوٹ بھیجیں — کیا ہوا، مریض ہوش میں ہے یا نہیں، خون تو نہیں بہہ رہا۔ ہسپتال کو ایمبولینس سے پہلے اطلاع مل جائے گی۔',
+    reportReceived: 'موصول ہو گیا۔ مریض کی رپورٹ تیار کی جا رہی ہے — تقریباً ایک منٹ۔',
+    reportReady: (r) =>
+      `📋 مریض کی رپورٹ تیار ہے\n\nنوعیت: *${r.urgency || 'نامعلوم'}*\n${r.type || ''}\n\n${r.firstAid ? `انتظار کے دوران: ${r.firstAid}\n\n` : ''}ہسپتال کو رپورٹ مل گئی ہے۔`,
+    reportFailed:
+      'یہ پروسیس نہیں ہو سکا۔ براہ کرم لکھ کر بتائیں — کیا مسئلہ ہے، مریض ہوش میں ہے یا نہیں، خون تو نہیں بہہ رہا۔',
   },
 
   roman: {
@@ -129,6 +139,11 @@ const copy = {
     unknown: 'Ambulance ke liye *SOS* bhejein.',
     voicePrompt:
       'Situation batane ke liye voice note bhejein — kya hua, mareez hosh mein hai ya nahi, khoon to nahi beh raha. Hospital ko ambulance se pehle ittila mil jayegi.',
+    reportReceived: 'Mil gaya. Mareez ki report tayyar ki ja rahi hai — taqreeban ek minute.',
+    reportReady: (r) =>
+      `📋 Mareez ki report tayyar hai\n\nUrgency: *${r.urgency || 'maloom nahi'}*\n${r.type || ''}\n\n${r.firstAid ? `Intezar ke doran: ${r.firstAid}\n\n` : ''}Hospital ko report mil gayi hai.`,
+    reportFailed:
+      'Ye process nahi ho saka. Likh kar batayein — kya masla hai, mareez hosh mein hai ya nahi, khoon to nahi beh raha.',
   },
 };
 

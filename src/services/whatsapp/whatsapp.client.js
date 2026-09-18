@@ -85,9 +85,21 @@ export async function sendButtons(to, body, buttons) {
   });
 }
 
+/**
+ * Send a file by URL — used for the AI patient report PDF. The link must be
+ * publicly fetchable by Meta; Supabase signed URLs qualify.
+ */
+export async function sendDocument(to, link, filename, caption) {
+  return callGraph({
+    to,
+    type: 'document',
+    document: { link, filename, caption },
+  });
+}
+
 /** Blue ticks. Cosmetic, but it tells the sender the system is alive. */
 export async function markAsRead(messageId) {
   return callGraph({ status: 'read', message_id: messageId });
 }
 
-export default { sendText, requestLocation, sendButtons, markAsRead, isConfigured };
+export default { sendText, requestLocation, sendButtons, sendDocument, markAsRead, isConfigured };
