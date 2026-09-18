@@ -48,8 +48,21 @@ const config = {
   orsApiKey: process.env.ORS_API_KEY || '',
   openaiApiKey: process.env.OPENAI_API_KEY || '',
 
+  // WhatsApp Cloud API — the second SOS intake channel. All optional: without
+  // them the webhook simply reports itself as unconfigured.
+  whatsapp: {
+    phoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID || '',
+    businessAccountId: process.env.WHATSAPP_BUSINESS_ACCOUNT_ID || '',
+    accessToken: process.env.WHATSAPP_ACCESS_TOKEN || '',
+    verifyToken: process.env.WHATSAPP_VERIFY_TOKEN || '',
+    appSecret: process.env.WHATSAPP_APP_SECRET || '',
+    apiVersion: process.env.WHATSAPP_API_VERSION || 'v25.0',
+  },
+
   // App URLs
   frontendUrl: process.env.FRONTEND_URL || 'http://localhost:5173',
+  // Where tracking links point. The public web app, not the hospital dashboard.
+  publicWebUrl: process.env.PUBLIC_WEB_URL || process.env.FRONTEND_URL || 'http://localhost:5173',
 };
 
 export default config;
