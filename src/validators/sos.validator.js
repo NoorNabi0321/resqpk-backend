@@ -36,9 +36,22 @@ export const cancelSOSSchema = Joi.object({
 });
 
 // 3. Driver responds to a dispatch request
+//
+// A decline may carry a reason. It is optional because the clock is running —
+// a driver who taps Decline and nothing else must still free the case for the
+// next ambulance immediately.
+export const DECLINE_REASONS = [
+  'on_another_case',
+  'too_far',
+  'vehicle_issue',
+  'not_available',
+  'other',
+];
+
 export const driverRespondSchema = Joi.object({
   caseId: Joi.string().uuid().required(),
   response: Joi.string().valid('accepted', 'declined').required(),
+  reason: Joi.string().valid(...DECLINE_REASONS).allow('', null),
 });
 
 // 4. Driver updates case status

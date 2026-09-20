@@ -18,6 +18,7 @@ export async function driverRespond(req, res) {
       caseId: value.caseId,
       driverId: req.user.driver_id,
       response: value.response,
+      reason: value.reason || null,
     });
     return successResponse(res, data, 'Response recorded', 200);
   } catch (err) {
@@ -46,6 +47,17 @@ export async function getMyActiveCase(req, res) {
   try {
     const data = await caseService.getMyActiveCase(req.user);
     return successResponse(res, data, data ? 'Active case' : 'No active case', 200);
+  } catch (err) {
+    return errorResponse(res, err.message, 400);
+  }
+}
+
+// GET /api/cases/driver/history (driver) — past runs plus this driver's numbers
+export async function getDriverHistory(req, res) {
+  try {
+    const limit = Number.parseInt(req.query.limit, 10) || 30;
+    const data = await caseService.getDriverHistory({ driverId: req.user.driver_id, limit });
+    return successResponse(res, data, 'Driver history', 200);
   } catch (err) {
     return errorResponse(res, err.message, 400);
   }

@@ -112,7 +112,37 @@ export async function createSOS({
 }
 
 // 2. Driver accepts/declines a dispatch request (the dispatch loop polls this).
-export async function driverRespondToCase({ caseId, driverId, response }) {
+//
+// A decline can arrive in two parts. The app sends the decline the instant it
+// is tapped — the next ambulance is waiting on it — and only then asks the
+// driver why, sending the reason as a second call. So a repeat decline that
+// carries a reason is not a duplicate: it is the label for one already counted.
+export async function driverRespondToCase({ caseId, driverId, response, reason = null }) {
+  const { data: request } = await supabaseAdmin
+    .from('case_driver_requests')
+    .select('id, response')
+    .eq('case_id', caseId)
+    .eq('driver_id', driverId)
+    .order('batch_number', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (!request) throw new Error('Request not found');
+
+  // Labelling a decline that has already been recorded. Deliberately skips the
+  // "is the case still searching" check: by now another ambulance has it, which
+  // is exactly what is supposed to happen.
+  if (request.response === 'declined' && response === 'declined' && reason) {
+    await supabaseAdmin
+      .from('case_driver_requests')
+      .update({ decline_reason: reason })
+      .eq('id', request.id);
+    return { success: true, message: 'Reason recorded' };
+  }
+
+  if (request.response !== 'pending') {
+    throw new Error('Request not found or already responded');
+  }
+
   const { data: emergencyCase } = await supabaseAdmin
     .from('emergency_cases')
     .select('status')
@@ -122,20 +152,15 @@ export async function driverRespondToCase({ caseId, driverId, response }) {
     throw new Error('Case no longer active');
   }
 
-  const { data: request } = await supabaseAdmin
-    .from('case_driver_requests')
-    .select('id, response')
-    .eq('case_id', caseId)
-    .eq('driver_id', driverId)
-    .eq('response', 'pending')
-    .maybeSingle();
-  if (!request) throw new Error('Request not found or already responded');
-
   await supabaseAdmin
     .from('case_driver_requests')
-    .update({ response, responded_at: new Date().toISOString() })
-    .eq('case_id', caseId)
-    .eq('driver_id', driverId);
+    .update({
+      response,
+      responded_at: new Date().toISOString(),
+      // Only a decline carries one, and only when the driver picked one.
+      decline_reason: response === 'declined' ? reason : null,
+    })
+    .eq('id', request.id);
 
   return {
     success: true,
@@ -365,6 +390,75 @@ export async function getMyActiveCase(user) {
   const { data, error } = await query.maybeSingle();
   if (error) throw new Error(error.message);
   return data || null;
+}
+
+// 6c. A driver's own record: the runs they have done, and how they are doing.
+//
+// Drivers volunteer for this — Edhi and Chhipa crews are not on a salary tied
+// to it — so the app owes them something back for the work. Counting what they
+// answered is the least it can do.
+export async function getDriverHistory({ driverId, limit = 30 }) {
+  const { data: cases, error } = await supabaseAdmin
+    .from('emergency_cases')
+    .select(
+      `id, case_number, status, patient_address, patient_lat, patient_lng,
+       emergency_type, urgency_level, sos_triggered_at, driver_assigned_at,
+       driver_arrived_at, completed_at, actual_driver_arrival_seconds,
+       hospital:hospital_id(name)`,
+    )
+    .eq('driver_id', driverId)
+    .order('driver_assigned_at', { ascending: false })
+    .limit(Math.min(limit, 100));
+  if (error) throw new Error(error.message);
+
+  // Offers, for the accept rate. A month is enough to be meaningful without
+  // holding a bad week against someone forever.
+  const monthAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const { data: offers } = await supabaseAdmin
+    .from('case_driver_requests')
+    .select('response, notified_at, responded_at, decline_reason')
+    .eq('driver_id', driverId)
+    .gte('notified_at', monthAgo);
+
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+
+  const rows = cases || [];
+  const answered = (offers || []).filter((o) => o.response && o.response !== 'pending');
+  const accepted = answered.filter((o) => o.response === 'accepted');
+
+  // How long the driver took to answer, which is the number dispatch cares
+  // about: every second here is a second the patient is still waiting.
+  const responseTimes = answered
+    .filter((o) => o.notified_at && o.responded_at)
+    .map((o) => (new Date(o.responded_at) - new Date(o.notified_at)) / 1000)
+    .filter((s) => s >= 0 && s < 120);
+
+  const completed = rows.filter((c) => c.status === 'completed');
+  const arrivalTimes = completed
+    .map((c) => c.actual_driver_arrival_seconds)
+    .filter((s) => typeof s === 'number' && s > 0);
+
+  const average = (list) =>
+    list.length ? Math.round(list.reduce((sum, n) => sum + n, 0) / list.length) : null;
+
+  return {
+    cases: rows,
+    stats: {
+      completed: completed.length,
+      today: rows.filter(
+        (c) => c.driver_assigned_at && new Date(c.driver_assigned_at) >= startOfToday,
+      ).length,
+      offers: answered.length,
+      accepted: accepted.length,
+      declined: answered.length - accepted.length,
+      acceptRate: answered.length
+        ? Math.round((accepted.length / answered.length) * 100)
+        : null,
+      avgResponseSeconds: average(responseTimes),
+      avgArrivalSeconds: average(arrivalTimes),
+    },
+  };
 }
 
 // 6b. Road-following route for the case's current leg (patient or driver).
@@ -628,6 +722,7 @@ export default {
   cancelSOS,
   getCaseDetails,
   getMyActiveCase,
+  getDriverHistory,
   getCaseRoute,
   listNearbyHospitals,
   changeCaseHospital,

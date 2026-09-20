@@ -9,6 +9,7 @@ import {
   handoffCase,
   getCaseDetails,
   getMyActiveCase,
+  getDriverHistory,
   getCaseRoute,
   changeHospital,
   getShareTracking,
@@ -43,6 +44,8 @@ router.put('/beds', authenticate, requireRole('hospital_admin'), updateBeds);
 router.post('/respond', authenticate, requireRole('driver'), driverRespond);
 router.put('/status', authenticate, requireRole('driver'), updateStatus);
 router.post('/handoff', authenticate, requireRole('driver'), handoffCase);
+// Declared before /:id so 'driver' is not read as a case id.
+router.get('/driver/history', authenticate, requireRole('driver'), getDriverHistory);
 
 // Session restore — declared before /:id so 'active' isn't read as an id.
 router.get('/active/me', authenticate, getMyActiveCase);
