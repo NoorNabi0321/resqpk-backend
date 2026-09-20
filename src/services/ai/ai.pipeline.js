@@ -178,18 +178,35 @@ export async function processAIReport(caseId, patientId, inputs) {
         emergency_type: reportData.emergency_type,
       })
       .eq('id', caseId)
-      .select('id, case_number, patient_address, sos_triggered_at, hospital_id')
+      .select(
+        `id, case_number, access_code, patient_address, patient_lat, patient_lng,
+         sos_triggered_at, hospital_id, driver_id, reporter_name, reporter_phone,
+         reported_for, channel`,
+      )
       .single();
     if (caseUpdateError) {
       logger.error(`Case update after report failed for ${caseId}: ${caseUpdateError.message}`);
     }
 
     // The patient's name for the PDF header, fetched separately.
-    const { data: patientUser } = await supabaseAdmin
-      .from('users')
-      .select('full_name')
-      .eq('id', patientId)
-      .maybeSingle();
+    const { data: patientUser } = patientId
+      ? await supabaseAdmin.from('users').select('full_name, phone').eq('id', patientId).maybeSingle()
+      : { data: null };
+
+    // Who is carrying them and where to — the two facts a receiving ward asks
+    // for first, and the only ones the report was missing.
+    const [{ data: hospitalRow }, { data: driverRow }] = await Promise.all([
+      caseRow?.hospital_id
+        ? supabaseAdmin.from('hospitals').select('name').eq('id', caseRow.hospital_id).maybeSingle()
+        : Promise.resolve({ data: null }),
+      caseRow?.driver_id
+        ? supabaseAdmin
+            .from('drivers')
+            .select('vehicle_number, users(full_name)')
+            .eq('id', caseRow.driver_id)
+            .maybeSingle()
+        : Promise.resolve({ data: null }),
+    ]);
 
     // STEP 8b — generate the PDF report and attach it to the saved row.
     // Best-effort: the JSON report is what the system runs on, the PDF is an
@@ -199,14 +216,33 @@ export async function processAIReport(caseId, patientId, inputs) {
       const caseWithPatient = {
         id: caseId,
         case_number: caseRow?.case_number,
-        patient_name: patientUser?.full_name,
+        access_code: caseRow?.access_code,
+        patient_name: patientUser?.full_name || caseRow?.reporter_name,
+        patient_phone: patientUser?.phone,
+        reporter_name: caseRow?.reporter_name,
+        reporter_phone: caseRow?.reporter_phone,
+        reported_for: caseRow?.reported_for,
+        channel: caseRow?.channel,
         patient_address: caseRow?.patient_address,
+        patient_lat: caseRow?.patient_lat,
+        patient_lng: caseRow?.patient_lng,
         sos_triggered_at: caseRow?.sos_triggered_at,
+        hospital_name: hospitalRow?.name,
+        driver_name: driverRow?.users?.full_name,
+        vehicle_number: driverRow?.vehicle_number,
       };
       pdfResult = await pdfService.generateReportPDF(
-        { ...reportData, transcribed_text: transcribedText, input_language: detectedLanguage },
+        {
+          ...reportData,
+          transcribed_text: transcribedText,
+          input_text: userText,
+          input_language: detectedLanguage,
+        },
         caseWithPatient,
         medicalProfile,
+        // The first photo, straight from memory — it is already here, and the
+        // stored copy is behind a signed URL the PDF step would have to fetch.
+        imageBuffers[0]?.buffer || null,
       );
 
     } catch (pdfError) {

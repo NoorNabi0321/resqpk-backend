@@ -6,6 +6,7 @@ import {
   generateReport,
   getReport,
   getReportPdf,
+  resendReportToHospital,
 } from '../controllers/ai.controller.js';
 
 const router = express.Router();
@@ -18,6 +19,7 @@ router.post('/report', caseAuth, uploadMiddleware, generateReport);
 // The reporter (by token or account) or the receiving hospital reads it.
 // The /pdf variant is declared first so it isn't captured by :caseId.
 router.get('/report/:caseId/pdf', caseAuth, getReportPdf);
+router.post('/report/:caseId/send', caseAuth, resendReportToHospital);
 router.get('/report/:caseId', caseAuth, getReport);
 
 export default router;

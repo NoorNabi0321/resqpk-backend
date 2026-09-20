@@ -4,7 +4,18 @@ import multer from 'multer';
 import aiPipeline from '../services/ai/ai.pipeline.js';
 import pdfService from '../services/pdf.service.js';
 import { supabaseAdmin } from '../config/supabase.js';
+import { getIO } from '../socket/socket.server.js';
+import { EVENTS, ROOMS } from '../socket/socket.events.js';
 import { successResponse, errorResponse } from '../utils/response.js';
+
+// Sockets are optional in tests and scripts — never let them throw.
+function emit(room, event, payload) {
+  try {
+    getIO()?.to(room).emit(event, payload);
+  } catch {
+    /* socket layer not running */
+  }
+}
 
 // Files stay in RAM (we stream them straight to Whisper/GPT/Storage).
 const upload = multer({
@@ -130,4 +141,80 @@ export async function getReportPdf(req, res) {
   }
 }
 
-export default { uploadMiddleware, generateReport, getReport, getReportPdf };
+// POST /api/ai/report/:caseId/send — push a finished report at the hospital
+// again.
+//
+// The pipeline already sends it the moment it is ready. This exists for the
+// moment at the counter where staff say they cannot see it: one tap puts it
+// back on their dashboard instead of the attendant re-dictating it.
+export async function resendReportToHospital(req, res) {
+  const { caseId } = req.params;
+
+  const { data: report } = await supabaseAdmin
+    .from('ai_reports')
+    .select(
+      `id, urgency_level, emergency_type, consciousness_state, key_observations,
+       first_aid_suggestion, possible_conditions, resources_needed, transcribed_text,
+       input_language, pdf_storage_path, generation_status,
+       emergency_cases!inner(patient_id, hospital_id, case_number)`,
+    )
+    .eq('case_id', caseId)
+    .maybeSingle();
+
+  if (!report) return errorResponse(res, 'Report not found', 404);
+
+  const ec = report.emergency_cases;
+  const viaCaseToken = req.caseAccess?.caseId === caseId;
+  const isOwnerPatient = req.user?.role === 'patient' && ec.patient_id === req.user.id;
+  if (!viaCaseToken && !isOwnerPatient) {
+    return errorResponse(res, 'Not authorized to send this report', 403);
+  }
+  if (report.generation_status !== 'completed') {
+    return errorResponse(res, 'The report is not finished yet', 400);
+  }
+  if (!ec.hospital_id) {
+    return errorResponse(res, 'No hospital has been chosen for this case yet', 400);
+  }
+
+  try {
+    let pdfUrl = null;
+    if (report.pdf_storage_path) {
+      pdfUrl = await pdfService.getSignedPdfUrl(report.pdf_storage_path);
+    }
+
+    emit(ROOMS.hospitalRoom(ec.hospital_id), EVENTS.HOSPITAL.HOSPITAL_CASE_UPDATE, {
+      caseId,
+      type: 'ai_report_ready',
+      resent: true,
+      report: {
+        urgencyLevel: report.urgency_level,
+        emergencyType: report.emergency_type,
+        consciousnessState: report.consciousness_state,
+        keyObservations: report.key_observations,
+        firstAidSuggestion: report.first_aid_suggestion,
+        possibleConditions: report.possible_conditions,
+        transcribedText: report.transcribed_text,
+        inputLanguage: report.input_language,
+      },
+      pdfUrl,
+      resourcesNeeded: report.resources_needed || [],
+    });
+
+    await supabaseAdmin
+      .from('ai_reports')
+      .update({ sent_to_hospital_at: new Date().toISOString() })
+      .eq('id', report.id);
+
+    return successResponse(res, { pdfUrl }, 'Report sent to the hospital', 200);
+  } catch (err) {
+    return errorResponse(res, err.message, 500);
+  }
+}
+
+export default {
+  uploadMiddleware,
+  generateReport,
+  getReport,
+  getReportPdf,
+  resendReportToHospital,
+};
