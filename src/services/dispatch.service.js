@@ -22,17 +22,31 @@ const DRIVER_RESPONSE_TIMEOUT_MS = 15000;
 const RESPONSE_GRACE_MS = 3000;
 const POLL_INTERVAL_MS = 1500;
 
+// How old a driver's last position may be and still count as on duty.
+//
+// is_available alone cannot be trusted. It is cleared when a socket
+// disconnects, and a server restart kills every socket at once without firing
+// those handlers — so after one restart the table is full of drivers marked
+// available who are not there. Ringing them costs the patient 15 seconds each,
+// three per ring, four rings: three minutes of silence before "no driver
+// found". A live driver's app broadcasts its position every few seconds, so a
+// recent fix is the honest test of whether anyone is actually listening.
+const LOCATION_FRESH_MS = 5 * 60 * 1000;
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // 1. Available, verified drivers within radius (closest first).
 export async function findAvailableDrivers(patientLat, patientLng, radiusMeters) {
+  const freshSince = new Date(Date.now() - LOCATION_FRESH_MS).toISOString();
+
   const { data: drivers, error } = await supabaseAdmin
     .from('drivers')
     .select('id, user_id, vehicle_number, current_lat, current_lng, heading, users(full_name, phone, fcm_token)')
     .eq('is_available', true)
     .eq('is_verified', true)
     .not('current_lat', 'is', null)
-    .not('current_lng', 'is', null);
+    .not('current_lng', 'is', null)
+    .gte('location_updated_at', freshSince);
 
   if (error || !drivers) return [];
 

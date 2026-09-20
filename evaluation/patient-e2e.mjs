@@ -244,15 +244,21 @@ try {
 // --- 6. Clean up ------------------------------------------------------------
 if (!flag('keep')) {
   console.log('\nCleanup');
-  try {
-    await call('/api/sos/cancel', {
-      method: 'POST',
-      token: caseToken,
-      body: { caseId, reason: 'false_alarm' },
-    });
+  const { status, json } = await call('/api/sos/cancel', {
+    method: 'POST',
+    token: caseToken,
+    body: { caseId, reason: 'false_alarm' },
+    raw: true,
+  });
+  if (status === 200) {
     ok('cancel with the case token');
-  } catch (e) {
-    bad('cancel with the case token', e.message);
+  } else if (status === 400 && /no longer/i.test(json.message || '')) {
+    // With no driver online the dispatch loop closes the case as
+    // no_driver_found before this runs. Refusing to cancel a case that is
+    // already finished is the right answer, not a failure.
+    ok('cancel refused — case already closed', json.message);
+  } else {
+    bad('cancel with the case token', `HTTP ${status}: ${json.message}`);
   }
 }
 

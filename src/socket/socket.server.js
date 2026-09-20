@@ -104,8 +104,27 @@ export function initializeSocketServer(httpServer) {
     socket.on('disconnect', (reason) => {
       logger.info(`Socket disconnected: ${socket.id} | Reason: ${reason}`);
 
-      // A driver going away should no longer receive dispatch requests.
+      // A driver going away should no longer receive dispatch requests — but
+      // only if they are really gone.
+      //
+      // A dead socket's disconnect can arrive up to a ping timeout late, long
+      // after the app has reconnected on a new one. Marking the driver
+      // unavailable then took a driver who was on duty, watching an "On duty"
+      // screen, out of every dispatch ring without telling them. That is the
+      // "driver is online but no driver found" fault.
+      //
+      // By the time 'disconnect' fires this socket has already left its rooms,
+      // so anything still in the driver's room is a live connection.
       if (socket.role === 'driver' && socket.driverId) {
+        const room = io.sockets.adapter.rooms.get(ROOMS.driverRoom(socket.driverId));
+        const stillConnectedElsewhere = (room?.size ?? 0) > 0;
+        if (stillConnectedElsewhere) {
+          logger.info(
+            `Driver ${socket.driverId} kept available — ${room.size} live socket(s) remain`,
+          );
+          return;
+        }
+
         supabaseAdmin
           .from('drivers')
           .update({ is_available: false })
