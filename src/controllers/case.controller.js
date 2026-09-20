@@ -124,9 +124,11 @@ export async function changeHospital(req, res) {
   const { hospitalId } = req.body || {};
   if (!hospitalId) return errorResponse(res, 'hospitalId is required', 400);
   try {
+    const viaCaseToken = req.caseAccess?.caseId === req.params.id;
     const data = await caseService.changeCaseHospital({
       caseId: req.params.id,
-      patientId: req.user.id,
+      patientId: viaCaseToken ? null : req.user?.id,
+      viaCaseToken,
       hospitalId,
     });
     return successResponse(res, data, 'Hospital updated', 200);

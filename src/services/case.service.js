@@ -562,14 +562,25 @@ export async function listNearbyHospitals({ lat, lng }) {
 // 6d. Patient confirms the suggested hospital, or picks a different one.
 // Until this runs an app-triggered case has no hospital, so no dashboard shows
 // it — see hospital-assignment.service.js.
-export async function changeCaseHospital({ caseId, patientId, hospitalId }) {
+export async function changeCaseHospital({
+  caseId,
+  patientId = null,
+  viaCaseToken = false,
+  hospitalId,
+}) {
   const { data: emergencyCase } = await supabaseAdmin
     .from('emergency_cases')
     .select('id, status, patient_id')
     .eq('id', caseId)
     .maybeSingle();
   if (!emergencyCase) throw new Error('Case not found');
-  if (emergencyCase.patient_id !== patientId) throw new Error('Not your case');
+
+  // A case token proves access to this one case, which is the whole of the
+  // claim being made here. Most patients now have no account at all, and
+  // choosing the hospital is theirs to do either way.
+  if (!viaCaseToken && emergencyCase.patient_id !== patientId) {
+    throw new Error('Not your case');
+  }
 
   // A hospital is chosen after an ambulance accepts — never while still
   // searching, which is exactly the request a hospital should not see.

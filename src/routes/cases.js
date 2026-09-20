@@ -56,6 +56,10 @@ router.get('/:id/route', caseAuth, getCaseRoute);
 router.get('/:id', caseAuth, getCaseDetails);
 
 // Patient only — change the destination hospital mid-case.
-router.put('/:id/hospital', authenticate, requireRole('patient'), changeHospital);
+// The reporter picks the destination — with an account or, far more often,
+// with the case token their phone is holding. requireRole('patient') here was
+// a 401 in the middle of an emergency for everyone without an account, which
+// left the case with no hospital and so on no hospital's dashboard.
+router.put('/:id/hospital', caseAuth, changeHospital);
 
 export default router;

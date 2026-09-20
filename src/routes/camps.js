@@ -22,8 +22,12 @@ const registerLimiter = rateLimit({
 router.post('/register', registerLimiter, registerCamp);
 
 // Literal paths before /:id so they aren't captured as an id.
-router.get('/nearby', authenticate, nearbyCamps);
+//
+// Free camps are public health information — the whole point is that anyone
+// can find them. They were behind auth, which since the anonymous-patient
+// change meant the Camps tab 401'd on a fresh install.
+router.get('/nearby', nearbyCamps);
 router.get('/dashboard/me', authenticate, requireRole('hospital_admin'), campDashboard);
-router.get('/:id', authenticate, campDetails);
+router.get('/:id', campDetails);
 
 export default router;
