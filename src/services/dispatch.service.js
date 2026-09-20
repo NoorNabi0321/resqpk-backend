@@ -248,13 +248,16 @@ export async function runDispatchCycle(caseId, patientLat, patientLng) {
 
   const { data: caseRow } = await supabaseAdmin
     .from('emergency_cases')
-    .select('patient_id, case_number, patient:patient_id(full_name)')
+    .select('patient_id, case_number, reporter_name, patient:patient_id(full_name)')
     .eq('id', caseId)
     .maybeSingle();
   const patientId = caseRow?.patient_id;
   const caseInfo = {
     caseNumber: caseRow?.case_number,
-    patientName: caseRow?.patient?.full_name || 'Anonymous Patient',
+    // Most callers have no account, but many give a name when they call. A
+    // driver deciding whether to take a run should see "Imran Shaikh", not
+    // "Anonymous Patient", when there is a name to show.
+    patientName: caseRow?.patient?.full_name || caseRow?.reporter_name || 'Anonymous Patient',
     patientLat,
     patientLng,
   };
