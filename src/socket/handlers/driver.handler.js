@@ -65,7 +65,7 @@ export default function driverHandler(io, socket) {
       // a case must stay unavailable, or dispatch would offer them a second one.
       const { data: activeCase } = await supabaseAdmin
         .from('emergency_cases')
-        .select('id')
+        .select('id, case_number')
         .eq('driver_id', driverId)
         .in('status', ['driver_assigned', 'arrived', 'en_route'])
         .limit(1)
@@ -84,9 +84,17 @@ export default function driverHandler(io, socket) {
         .eq('id', driverId);
       if (error) throw new Error(error.message);
 
-      logger.info(
-        `Driver ${driverId} went online at ${lat},${lng}${isAvailable ? '' : ` (on case ${activeCase.id})`}`,
-      );
+      if (isAvailable) {
+        logger.info(`Driver ${driverId} went online at ${lat},${lng}`);
+      } else {
+        // Loud, because this is the shape of the "driver is online but the
+        // patient gets no driver found" fault: the driver is connected and
+        // broadcasting, and dispatch still cannot see them.
+        logger.warn(
+          `Driver ${driverId} went online at ${lat},${lng} but stays UNAVAILABLE — ` +
+            `still holds case ${activeCase.case_number}`,
+        );
+      }
 
       io.emit(EVENTS.DRIVER.DRIVER_STATUS_CHANGED, {
         driverId,
@@ -95,7 +103,19 @@ export default function driverHandler(io, socket) {
         lng,
       });
 
-      if (typeof callback === 'function') callback({ success: true });
+      // The reply carries availability, not just success. The app used to take
+      // success:true as "on duty" and show it, while the server had the driver
+      // out of every dispatch ring — so the one person who could have fixed it
+      // was the one person not told.
+      if (typeof callback === 'function') {
+        callback({
+          success: true,
+          isAvailable,
+          heldCase: activeCase
+            ? { id: activeCase.id, caseNumber: activeCase.case_number }
+            : null,
+        });
+      }
     } catch (err) {
       logger.error(`go_online error: ${err.message}`);
       if (typeof callback === 'function') callback({ success: false, error: err.message });

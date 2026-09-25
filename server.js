@@ -7,6 +7,7 @@ import config from './src/config/env.js';
 import logger from './src/middleware/logger.js';
 import { initializeSocketServer } from './src/socket/socket.server.js';
 import { sendWeeklyEngagementNotifications } from './src/services/notification.service.js';
+import { reapStaleCases } from './src/services/stale-case.service.js';
 
 // Build the HTTP server from the Express app so Socket.io can share the port.
 const httpServer = http.createServer(app);
@@ -36,6 +37,24 @@ cron.schedule(
   { timezone: 'Asia/Karachi' },
 );
 logger.info('Weekly engagement cron scheduled (Sundays 10:00 AM PKT).');
+
+// Abandoned cases hold their driver out of dispatch until someone closes them,
+// so this runs often and at boot — a restart is exactly when cases get
+// stranded, and the first patient after one should not pay for it.
+const sweepStaleCases = async () => {
+  try {
+    const { closed, freed } = await reapStaleCases(io);
+    if (closed > 0) {
+      logger.info(`Stale case sweep: closed ${closed}, freed ${freed} driver(s).`);
+    }
+  } catch (error) {
+    logger.error(`Stale case sweep failed: ${error.message}`);
+  }
+};
+
+cron.schedule('*/10 * * * *', sweepStaleCases);
+logger.info('Stale case sweep scheduled (every 10 minutes).');
+sweepStaleCases();
 
 // Crash cleanly on programming errors rather than running in a bad state.
 process.on('uncaughtException', (err) => {
