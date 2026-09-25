@@ -2,6 +2,7 @@
 import OpenAI from 'openai';
 
 import promptBuilder from './prompt.builder.js';
+import { normaliseConsciousness, normaliseUrgency } from './normalise.js';
 import logger from '../../middleware/logger.js';
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -73,10 +74,12 @@ export async function generateReport(inputs) {
     throw new Error('AI returned invalid JSON');
   }
 
-  // Ensure the required fields always exist, even if the model omitted them.
-  reportData.urgency_level = reportData.urgency_level || 'unknown';
+  // Ensure the required fields always exist, and that the two the database
+  // constrains are values it will actually accept — "high" and "semi
+  // conscious" are perfectly reasonable answers that would fail the insert.
+  reportData.urgency_level = normaliseUrgency(reportData.urgency_level);
   reportData.emergency_type = reportData.emergency_type || 'unknown';
-  reportData.consciousness_state = reportData.consciousness_state || 'unknown';
+  reportData.consciousness_state = normaliseConsciousness(reportData.consciousness_state);
   if (!Array.isArray(reportData.key_observations)) reportData.key_observations = [];
 
   // resources_needed drives the hospital's accept/redirect decision, so it must

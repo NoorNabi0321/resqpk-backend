@@ -8,6 +8,7 @@ import logger from '../../middleware/logger.js';
 
 import whisperService from './whisper.service.js';
 import gptService from './gpt.service.js';
+import { normaliseLanguage } from './normalise.js';
 import pdfService from '../pdf.service.js';
 import * as fileUtils from '../../utils/file.utils.js';
 
@@ -105,8 +106,18 @@ export async function processAIReport(caseId, patientId, inputs) {
         voiceNoteMimeType,
       );
       transcribedText = transcription.text;
-      detectedLanguage = transcription.detectedLanguage || detectedLanguage || 'en';
-      logger.info(`Transcribed ${transcription.duration}s audio in ${detectedLanguage}`);
+      // Whisper answers with a language NAME — "urdu", "english" — and often
+      // reaches for Hindi or Punjabi on Urdu speech. The column takes four
+      // codes and nothing else, so map it before it goes anywhere near a row.
+      detectedLanguage = normaliseLanguage(
+        transcription.detectedLanguage || detectedLanguage || 'en',
+      );
+      logger.info(
+        `Transcribed ${transcription.duration}s audio, `
+          + `Whisper said "${transcription.detectedLanguage}" → ${detectedLanguage}`,
+      );
+    } else {
+      detectedLanguage = normaliseLanguage(detectedLanguage || 'en');
     }
 
     // STEP 6 — analyze images (parallel, fault-tolerant).
@@ -165,7 +176,13 @@ export async function processAIReport(caseId, patientId, inputs) {
       )
       .select()
       .single();
-    if (saveError) throw new Error(`Saving report failed: ${saveError.message}`);
+    if (saveError) {
+      // The detail belongs in the log, not on a phone screen. Someone standing
+      // over a casualty cannot act on "violates check constraint
+      // ai_reports_input_language_check".
+      logger.error(`Saving report failed for case ${caseId}: ${saveError.message}`);
+      throw new Error('The report could not be saved. Please try again.');
+    }
 
     // Plain column list: an embedded join here (patient:users(...)) makes the
     // whole update+select return null, which silently emptied the PDF header
