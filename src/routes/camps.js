@@ -6,6 +6,7 @@ import {
   nearbyCamps,
   campDashboard,
   campDetails,
+  campRoute,
 } from '../controllers/camp.controller.js';
 
 const router = express.Router();
@@ -28,6 +29,7 @@ router.post('/register', registerLimiter, registerCamp);
 // change meant the Camps tab 401'd on a fresh install.
 router.get('/nearby', nearbyCamps);
 router.get('/dashboard/me', authenticate, requireRole('hospital_admin'), campDashboard);
+router.get('/:id/route', campRoute);
 router.get('/:id', campDetails);
 
 export default router;
