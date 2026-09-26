@@ -77,15 +77,11 @@ export async function assignHospitalToCase({ caseId, hospitalId, source = 'patie
 
   const { error } = await supabaseAdmin
     .from('emergency_cases')
-    .update({
-      hospital_id: hospital.id,
-      // The newly chosen hospital has not reviewed anything yet, even if the
-      // previous one had already accepted.
-      hospital_decision: 'awaiting_review',
-      decision_at: null,
-      decision_by: null,
-      preparation_note: null,
-    })
+    // hospital_decision, decision_at, decision_by and preparation_note were
+    // reset here for the new hospital to review. Nothing reviews now — the
+    // ward is told what is coming, not asked whether to take it — so the
+    // columns are left to the rows that already carry them.
+    .update({ hospital_id: hospital.id })
     .eq('id', caseId);
   if (error) throw new Error(error.message);
 

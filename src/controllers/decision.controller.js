@@ -4,51 +4,10 @@ import { supabaseAdmin } from '../config/supabase.js';
 import decisionService from '../services/decision.service.js';
 import {
   QUICK_MESSAGES,
-  REDIRECT_REASONS,
-  PREPARATION_NOTES,
 } from '../constants/quick.messages.js';
 import { successResponse, errorResponse } from '../utils/response.js';
 
 // POST /api/decisions/accept
-export async function acceptCase(req, res) {
-  const { caseId, preparationNote } = req.body || {};
-  if (!caseId) return errorResponse(res, 'caseId is required', 400);
-  try {
-    const data = await decisionService.acceptCase({
-      caseId,
-      hospitalAdminUserId: req.user.id,
-      hospitalId: req.user.hospital_id,
-      preparationNote: preparationNote || null,
-    });
-    return successResponse(res, data, 'Case accepted', 200);
-  } catch (err) {
-    const code = err.message.includes('not found') ? 404 : 400;
-    return errorResponse(res, err.message, code);
-  }
-}
-
-// POST /api/decisions/redirect
-export async function redirectCase(req, res) {
-  const { caseId, newHospitalId, reason } = req.body || {};
-  if (!caseId || !newHospitalId || !reason) {
-    return errorResponse(res, 'caseId, newHospitalId and reason are required', 400);
-  }
-  try {
-    const data = await decisionService.redirectCase({
-      caseId,
-      hospitalAdminUserId: req.user.id,
-      hospitalId: req.user.hospital_id,
-      newHospitalId,
-      reason,
-    });
-    return successResponse(res, data, 'Case redirected', 200);
-  } catch (err) {
-    const code = err.message.includes('not found') ? 404 : 400;
-    return errorResponse(res, err.message, code);
-  }
-}
-
-// POST /api/decisions/message — hospital_admin or driver
 export async function sendMessage(req, res) {
   const { caseId, messageKey } = req.body || {};
   if (!caseId || !messageKey) {
@@ -105,12 +64,10 @@ export async function getConstants(req, res) {
     res,
     {
       quickMessages: QUICK_MESSAGES,
-      redirectReasons: REDIRECT_REASONS,
-      preparationNotes: PREPARATION_NOTES,
     },
     'Decision constants',
     200,
   );
 }
 
-export default { acceptCase, redirectCase, sendMessage, listMessages, getConstants };
+export default { sendMessage, listMessages, getConstants };

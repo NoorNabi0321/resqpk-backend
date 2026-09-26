@@ -229,101 +229,10 @@ export async function matchResources(hospitalId, resourcesNeeded) {
   return buildChecks(needed, resources || [], keywordMap);
 }
 
-// 4. Redirect picker: nearby hospitals ranked by resource match, then distance.
-export async function getNearbyAlternativeHospitals(
-  currentHospitalId,
-  ambulanceLat,
-  ambulanceLng,
-  resourcesNeeded,
-) {
-  const { data: hospitals, error } = await supabaseAdmin
-    .from('hospitals')
-    .select('id, name, lat, lng, address, emergency_phone')
-    .eq('facility_type', 'hospital')
-    .eq('is_active', true)
-    .neq('id', currentHospitalId);
-  if (error) throw new Error(error.message);
-
-  const candidates = (hospitals || []).filter((h) => h.lat != null && h.lng != null);
-  if (candidates.length === 0) return [];
-
-  const needed = (Array.isArray(resourcesNeeded) ? resourcesNeeded : []).filter(
-    (r) => r != null && String(r).trim() !== '',
-  );
-
-  // One read for every candidate's resources, then match in memory — avoids a
-  // query per hospital when the receptionist opens the redirect picker.
-  let resourcesByHospital = new Map();
-  let keywordMap = [];
-  if (needed.length > 0) {
-    keywordMap = await loadKeywordMap();
-    const { data: allResources, error: resError } = await supabaseAdmin
-      .from('hospital_resources')
-      .select('hospital_id, canonical_key, resource_name, status, quantity')
-      .in(
-        'hospital_id',
-        candidates.map((h) => h.id),
-      );
-    if (resError) throw new Error(resError.message);
-
-    resourcesByHospital = (allResources || []).reduce((map, row) => {
-      if (!map.has(row.hospital_id)) map.set(row.hospital_id, []);
-      map.get(row.hospital_id).push(row);
-      return map;
-    }, new Map());
-  }
-
-  const hasPosition = Number.isFinite(Number(ambulanceLat)) && Number.isFinite(Number(ambulanceLng));
-
-  const results = candidates.map((h) => {
-    const distanceMeters = hasPosition
-      ? Math.round(
-          mapsService.haversineDistance(
-            Number(ambulanceLat),
-            Number(ambulanceLng),
-            Number(h.lat),
-            Number(h.lng),
-          ),
-        )
-      : null;
-
-    const match =
-      needed.length > 0
-        ? buildChecks(needed, resourcesByHospital.get(h.id) || [], keywordMap)
-        : { overallOk: true, missingCount: 0, summary: 'No specific resources identified' };
-
-    return {
-      hospital: { id: h.id, name: h.name, lat: Number(h.lat), lng: Number(h.lng) },
-      address: h.address,
-      emergencyPhone: h.emergency_phone,
-      distanceMeters,
-      distanceText: distanceMeters == null ? 'Distance unknown' : formatDistance(distanceMeters),
-      resourceMatch: {
-        overallOk: match.overallOk,
-        missingCount: match.missingCount,
-        summary: match.summary,
-      },
-    };
-  });
-
-  // Hospitals that can actually treat the patient first, then nearest.
-  results.sort((a, b) => {
-    if (a.resourceMatch.overallOk !== b.resourceMatch.overallOk) {
-      return a.resourceMatch.overallOk ? -1 : 1;
-    }
-    if (a.distanceMeters == null) return 1;
-    if (b.distanceMeters == null) return -1;
-    return a.distanceMeters - b.distanceMeters;
-  });
-
-  return results.slice(0, 8);
-}
-
 export default {
   getHospitalResources,
   updateResource,
   matchResources,
-  getNearbyAlternativeHospitals,
   invalidateKeywordCache,
   resolveCanonicalKey,
   buildChecks,

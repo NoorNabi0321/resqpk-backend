@@ -1,8 +1,10 @@
-// Hospital decisions on an incoming case: accept, redirect to another
-// hospital, and the preset quick-message exchange with the driver.
+// The preset quick-message exchange between a ward and the ambulance
+// bringing someone in.
 //
-// This is the receptionist's real job in v2: See -> Read -> Decide ->
-// Communicate. Everything here is the "Decide" and "Communicate" half.
+// The receptionist's job here is See -> Read -> Prepare. It used to include
+// Decide — accept the patient or send them elsewhere — and that has gone: an
+// ambulance already on its way is coming whatever the dashboard says, and the
+// useful thing a ward can do with the notice is have the bay ready.
 import { supabaseAdmin } from '../config/supabase.js';
 import { getIO } from '../socket/socket.server.js';
 import { EVENTS, ROOMS } from '../socket/socket.events.js';
@@ -10,8 +12,6 @@ import mapsService from './maps.service.js';
 import notificationService from './notification.service.js';
 import {
   QUICK_MESSAGES,
-  REDIRECT_REASONS,
-  PREPARATION_NOTES,
   getMessageByKey,
 } from '../constants/quick.messages.js';
 import logger from '../middleware/logger.js';
@@ -57,231 +57,13 @@ async function logCaseMessage({ caseId, senderRole, senderUserId, messageKey, me
   return data;
 }
 
-// --- 1. Accept ---------------------------------------------------------------
-
-export async function acceptCase({ caseId, hospitalAdminUserId, hospitalId, preparationNote }) {
-  if (preparationNote != null && !PREPARATION_NOTES.includes(preparationNote)) {
-    throw new Error('Invalid preparation note');
-  }
-
-  const { data: emergencyCase } = await supabaseAdmin
-    .from('emergency_cases')
-    .select('id, case_number, hospital_id, driver_id, hospital_decision')
-    .eq('id', caseId)
-    .maybeSingle();
-  if (!emergencyCase) throw new Error('Case not found');
-  if (emergencyCase.hospital_id !== hospitalId) throw new Error('Case does not belong to your hospital');
-  if (emergencyCase.hospital_decision !== 'awaiting_review') throw new Error('Case already decided');
-
-  const timestamp = new Date().toISOString();
-  const { error } = await supabaseAdmin
-    .from('emergency_cases')
-    .update({
-      hospital_decision: 'accepted',
-      decision_at: timestamp,
-      decision_by: hospitalAdminUserId,
-      preparation_note: preparationNote || null,
-    })
-    .eq('id', caseId);
-  if (error) throw new Error(error.message);
-
-  const { data: hospital } = await supabaseAdmin
-    .from('hospitals')
-    .select('name')
-    .eq('id', hospitalId)
-    .maybeSingle();
-  const hospitalName = hospital?.name || 'Hospital';
-
-  const payload = {
-    caseId,
-    decision: 'accepted',
-    hospitalName,
-    preparationNote: preparationNote || null,
-    timestamp,
-  };
-
-  // Driver and patient both listen in the case room. The driver room is
-  // targeted too so the decision still lands if their app reconnected and has
-  // not rejoined the case room yet.
-  emit(ROOMS.caseRoom(caseId), EVENTS.DECISION.CASE_ACCEPTED, payload);
-  emit(ROOMS.hospitalRoom(hospitalId), EVENTS.DECISION.CASE_ACCEPTED, payload);
-  if (emergencyCase.driver_id) {
-    emit(ROOMS.driverRoom(emergencyCase.driver_id), EVENTS.DECISION.CASE_ACCEPTED, payload);
-  }
-
-  const token = await getDriverPushToken(emergencyCase.driver_id);
-  await notificationService.sendDriverDecisionNotification(token, {
-    title: 'Hospital accepted',
-    body: `${hospitalName} accepted the patient${preparationNote ? ` — ${preparationNote}` : ''}`,
-    data: { type: 'case_accepted', caseId },
-  });
-
-  await logCaseMessage({
-    caseId,
-    senderRole: 'hospital',
-    senderUserId: hospitalAdminUserId,
-    messageKey: 'accepted',
-    messageText: `Hospital accepted the patient${preparationNote ? ` — ${preparationNote}` : ''}`,
-  });
-
-  logger.info(`Case ${emergencyCase.case_number} accepted by ${hospitalName}`);
-  return payload;
-}
-
-// --- 2. Redirect -------------------------------------------------------------
-
-export async function redirectCase({
-  caseId,
-  hospitalAdminUserId,
-  hospitalId,
-  newHospitalId,
-  reason,
-}) {
-  if (!REDIRECT_REASONS.includes(reason)) throw new Error('Invalid redirect reason');
-  if (newHospitalId === hospitalId) throw new Error('Cannot redirect a case to the same hospital');
-
-  const { data: emergencyCase } = await supabaseAdmin
-    .from('emergency_cases')
-    .select('id, case_number, hospital_id, driver_id, hospital_decision, patient_id')
-    .eq('id', caseId)
-    .maybeSingle();
-  if (!emergencyCase) throw new Error('Case not found');
-  if (emergencyCase.hospital_id !== hospitalId) throw new Error('Case does not belong to your hospital');
-  if (emergencyCase.hospital_decision !== 'awaiting_review') throw new Error('Case already decided');
-
-  const { data: newHospital } = await supabaseAdmin
-    .from('hospitals')
-    .select('id, name, lat, lng, is_active, facility_type')
-    .eq('id', newHospitalId)
-    .maybeSingle();
-  if (!newHospital || !newHospital.is_active) throw new Error('Destination hospital not found');
-  // Camps are not valid redirect targets here — low-urgency camp routing is
-  // wired separately in Phase 6.
-  if (newHospital.facility_type !== 'hospital') throw new Error('Destination must be a hospital');
-
-  const timestamp = new Date().toISOString();
-
-  // Recalculate ETA from the driver's current position to the new hospital.
-  let newEtaSeconds = null;
-  let newEtaText = null;
-  try {
-    const { data: driver } = await supabaseAdmin
-      .from('drivers')
-      .select('current_lat, current_lng')
-      .eq('id', emergencyCase.driver_id)
-      .maybeSingle();
-    if (driver?.current_lat != null && newHospital.lat != null) {
-      const eta = await mapsService.getDistanceAndETA(
-        Number(driver.current_lat),
-        Number(driver.current_lng),
-        Number(newHospital.lat),
-        Number(newHospital.lng),
-      );
-      newEtaSeconds = eta.durationSeconds;
-      newEtaText = eta.durationText;
-    }
-  } catch (err) {
-    logger.warn(`ETA recalculation after redirect failed: ${err.message}`);
-  }
-
-  const update = {
-    // The new hospital must make its own decision.
-    hospital_decision: 'awaiting_review',
-    redirected_from_hospital_id: hospitalId,
-    redirect_reason: reason,
-    decision_at: timestamp,
-    decision_by: hospitalAdminUserId,
-    hospital_id: newHospitalId, // THE KEY REASSIGNMENT
-  };
-  if (newEtaSeconds != null) update.estimated_driver_arrival_seconds = newEtaSeconds;
-
-  const { error } = await supabaseAdmin.from('emergency_cases').update(update).eq('id', caseId);
-  if (error) throw new Error(error.message);
-
-  const { data: oldHospital } = await supabaseAdmin
-    .from('hospitals')
-    .select('name')
-    .eq('id', hospitalId)
-    .maybeSingle();
-  const oldHospitalName = oldHospital?.name || 'Previous hospital';
-
-  const payload = {
-    caseId,
-    oldHospitalName,
-    newHospital: {
-      id: newHospital.id,
-      name: newHospital.name,
-      lat: Number(newHospital.lat),
-      lng: Number(newHospital.lng),
-    },
-    reason,
-    newEtaSeconds,
-    newEtaText,
-    timestamp,
-  };
-
-  // Driver + patient.
-  emit(ROOMS.caseRoom(caseId), EVENTS.DECISION.CASE_REDIRECTED, payload);
-  if (emergencyCase.driver_id) {
-    emit(ROOMS.driverRoom(emergencyCase.driver_id), EVENTS.DECISION.CASE_REDIRECTED, payload);
-  }
-
-  // The receiving hospital gets the full card AND the existing report, so the
-  // case arrives there complete rather than as a bare notification.
-  const { data: report } = await supabaseAdmin
-    .from('ai_reports')
-    .select('pdf_url, resources_needed, urgency_level, emergency_type')
-    .eq('case_id', caseId)
-    .maybeSingle();
-
-  emit(ROOMS.hospitalRoom(newHospitalId), EVENTS.HOSPITAL.HOSPITAL_NEW_CASE, {
-    caseId,
-    caseNumber: emergencyCase.case_number,
-    type: 'redirected_in',
-    redirectedFrom: oldHospitalName,
-    reason,
-    etaSeconds: newEtaSeconds,
-    pdfUrl: report?.pdf_url || null,
-    resourcesNeeded: report?.resources_needed || [],
-    urgencyLevel: report?.urgency_level || null,
-    emergencyType: report?.emergency_type || null,
-  });
-
-  emit(ROOMS.hospitalRoom(hospitalId), EVENTS.HOSPITAL.HOSPITAL_CASE_UPDATE, {
-    caseId,
-    type: 'redirected_away',
-    newHospitalName: newHospital.name,
-    reason,
-  });
-
-  const token = await getDriverPushToken(emergencyCase.driver_id);
-  await notificationService.sendDriverDecisionNotification(token, {
-    title: 'Redirect',
-    body: `Go to ${newHospital.name} instead — ${reason}`,
-    data: {
-      type: 'case_redirected',
-      caseId,
-      newHospitalId: newHospital.id,
-      newHospitalLat: newHospital.lat,
-      newHospitalLng: newHospital.lng,
-    },
-  });
-
-  await logCaseMessage({
-    caseId,
-    senderRole: 'hospital',
-    senderUserId: hospitalAdminUserId,
-    messageKey: 'redirected',
-    messageText: `Redirected to ${newHospital.name} — ${reason}`,
-  });
-
-  logger.info(
-    `Case ${emergencyCase.case_number} redirected ${oldHospitalName} -> ${newHospital.name} (${reason})`,
-  );
-  return payload;
-}
-
-// --- 3. Quick messages -------------------------------------------------------
+// --- Quick messages ---------------------------------------------------------
+//
+// Accept and redirect used to live here. The hospital no longer decides
+// whether to take a patient: an ambulance that is coming is coming, and a ward
+// that has been told what is arriving and when can have the trolley and the
+// blood ready. Deciding in an app, minutes out, against resource figures
+// nobody was updating, was never the reliable half of that.
 
 export async function sendQuickMessage({ caseId, senderUserId, senderRole, messageKey }) {
   const message = getMessageByKey(messageKey);
@@ -358,7 +140,7 @@ export async function sendQuickMessage({ caseId, senderUserId, senderRole, messa
   return row;
 }
 
-// --- 4. Message history ------------------------------------------------------
+// --- Message history ---------------------------------------------------------
 
 export async function getCaseMessages(caseId) {
   const { data, error } = await supabaseAdmin
@@ -371,11 +153,7 @@ export async function getCaseMessages(caseId) {
 }
 
 export default {
-  acceptCase,
-  redirectCase,
   sendQuickMessage,
   getCaseMessages,
   QUICK_MESSAGES,
-  REDIRECT_REASONS,
-  PREPARATION_NOTES,
 };

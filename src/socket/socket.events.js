@@ -49,10 +49,10 @@ export const EVENTS = Object.freeze({
     HOSPITAL_AMBULANCE_UPDATE: 'hospital:ambulance_update',
     BED_STATUS_CHANGED: 'hospital:bed_status_changed',
   }),
-  // v2 — hospital decisions on an incoming case.
+  // Ward and ambulance talking to each other about a case already on its way.
+  // case:accepted and case:redirected were here; a ward no longer decides
+  // whether to take a patient, so there is no decision to broadcast.
   DECISION: Object.freeze({
-    CASE_ACCEPTED: 'case:accepted',
-    CASE_REDIRECTED: 'case:redirected',
     QUICK_MESSAGE: 'case:quick_message',
   }),
   TRACKING: Object.freeze({

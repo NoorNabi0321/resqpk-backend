@@ -4,7 +4,6 @@ import {
   listResources,
   updateResource,
   matchCaseResources,
-  alternativeHospitals,
 } from '../controllers/resource.controller.js';
 
 const router = express.Router();
@@ -14,7 +13,6 @@ router.use(authenticate, requireRole('hospital_admin'));
 
 // Specific paths before /:canonicalKey so they aren't swallowed as a key.
 router.get('/match/:caseId', matchCaseResources);
-router.get('/alternatives/:caseId', alternativeHospitals);
 
 router.get('/', listResources);
 router.put('/:canonicalKey', updateResource);

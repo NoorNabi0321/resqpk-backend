@@ -88,38 +88,4 @@ export async function matchCaseResources(req, res) {
   }
 }
 
-// GET /api/resources/alternatives/:caseId
-export async function alternativeHospitals(req, res) {
-  try {
-    const { emergencyCase, resourcesNeeded } = await getCaseResourceNeeds(
-      req.params.caseId,
-      req.user.hospital_id,
-    );
-
-    // Rank alternatives from where the ambulance actually is right now.
-    let ambulanceLat = null;
-    let ambulanceLng = null;
-    if (emergencyCase.driver_id) {
-      const { data: driver } = await supabaseAdmin
-        .from('drivers')
-        .select('current_lat, current_lng')
-        .eq('id', emergencyCase.driver_id)
-        .maybeSingle();
-      ambulanceLat = driver?.current_lat ?? null;
-      ambulanceLng = driver?.current_lng ?? null;
-    }
-
-    const data = await resourceService.getNearbyAlternativeHospitals(
-      req.user.hospital_id,
-      ambulanceLat,
-      ambulanceLng,
-      resourcesNeeded,
-    );
-    return successResponse(res, data, 'Alternative hospitals', 200);
-  } catch (err) {
-    const code = err.message.includes('not found') ? 404 : 403;
-    return errorResponse(res, err.message, code);
-  }
-}
-
-export default { listResources, updateResource, matchCaseResources, alternativeHospitals };
+export default { listResources, updateResource, matchCaseResources, };
