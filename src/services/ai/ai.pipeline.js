@@ -101,20 +101,32 @@ export async function processAIReport(caseId, patientId, inputs) {
     let transcribedText = null;
     let detectedLanguage = inputLanguage === 'auto' ? null : inputLanguage;
     if (voiceNoteBuffer) {
+      // The caller's choice goes to the model. It used to be collected in the
+      // app and dropped here, leaving the model to guess — and Urdu and Hindi
+      // are the same language to an ear, differing only in script, so it
+      // guessed Hindi and wrote a live report in Devanagari.
+      const chosen = inputLanguage && inputLanguage !== 'auto' ? inputLanguage : null;
       const transcription = await whisperService.transcribeWithRetry(
         voiceNoteBuffer,
         voiceNoteMimeType,
+        chosen,
       );
       transcribedText = transcription.text;
-      // Whisper answers with a language NAME — "urdu", "english" — and often
-      // reaches for Hindi or Punjabi on Urdu speech. The column takes four
-      // codes and nothing else, so map it before it goes anywhere near a row.
+      // Trust the caller's own choice over the model's guess. Failing that,
+      // the model's answer is a language NAME — "urdu", "english" — and it
+      // reaches for Hindi or Punjabi on Urdu speech, so it is mapped before it
+      // goes near a column that takes four codes and nothing else.
+      // gpt-4o-transcribe does not report a language at all, hence the
+      // classifier on the text as the last resort.
       detectedLanguage = normaliseLanguage(
-        transcription.detectedLanguage || detectedLanguage || 'en',
+        chosen
+          || transcription.detectedLanguage
+          || (transcribedText ? await whisperService.detectLanguageFromText(transcribedText) : 'en'),
       );
       logger.info(
-        `Transcribed ${transcription.duration}s audio, `
-          + `Whisper said "${transcription.detectedLanguage}" → ${detectedLanguage}`,
+        `Transcribed ${transcription.duration ?? '?'}s audio `
+          + `(asked for ${chosen || 'auto'}, model said "${transcription.detectedLanguage || 'nothing'}")`
+          + ` → ${detectedLanguage}`,
       );
     } else {
       detectedLanguage = normaliseLanguage(detectedLanguage || 'en');
