@@ -34,20 +34,33 @@ const BRAND_INK = '#C2410C';
 const MARGIN = 46;
 const HEADER_HEIGHT = 92;
 
-// --- The one-page budget ----------------------------------------------------
+// --- The page budget --------------------------------------------------------
 //
-// This report is printed and clipped to a chart, and a receiving ward reads
-// the sheet in front of it. A second page is a page that gets left on the
-// printer. So the layout has no addPage anywhere, and every section that grows
-// with the data is capped: lists are truncated, paragraphs are clamped with
-// ellipsis, and the resource line shrinks its own type to fit.
+// One page when the report fits on one, never more than two.
 //
-// These numbers are what fits an A4 page with the photo. one-page.test.mjs
-// renders the extremes — a report with everything, long text in every field —
-// and fails if the result is more than one page.
-const PHOTO_HEIGHT = 96;
-const MAX_OBSERVATIONS = 5;
-const MAX_CONDITIONS = 5;
+// Squeezing everything onto a single page meant clamping the clinical free
+// text to about two lines each and cutting the rest with an ellipsis, so a
+// long first-aid instruction ended mid-sentence and the ward could not tell
+// anything was missing. Silently truncated clinical text is worse than a
+// second sheet, so the clamps below are generous now — they exist to bound the
+// worst case at two pages, not to force one.
+//
+// The photo stays modest because it sits above everything a doctor reads, and
+// pushing the assessment onto page two to make room for a bigger picture is
+// the wrong trade.
+//
+// pdfkit starts a new page by itself the moment text passes the bottom margin,
+// silently and only for the data that happens to be long, so
+// evaluation/pdf-one-page.mjs renders both a realistic report and a
+// deliberately absurd one: the first must be one page, the second at most two.
+const PHOTO_HEIGHT = 124;
+const MAX_OBSERVATIONS = 10;
+const MAX_CONDITIONS = 8;
+
+// Heights that clinical free text may occupy before it is cut. Roughly four
+// lines each — past that a model is padding, not reporting.
+const CALLER_TEXT_HEIGHT = 96;
+const CLINICAL_TEXT_HEIGHT = 48;
 
 const LOGO_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), '../assets/resqpk-logo.png');
 let logoBuffer;
@@ -191,8 +204,11 @@ function divider(doc) {
 }
 
 function sectionHeading(doc, label) {
-  // The one-page budget is tight; PDF_TRACE=1 prints where each section lands.
+  // PDF_TRACE=1 prints where each section lands, for retuning the budget.
   if (process.env.PDF_TRACE) console.log(`  y=${doc.y.toFixed(0)}  ${label}`);
+  // A heading alone at the foot of page one, with its content overleaf, is
+  // the worst way to spend the second page.
+  if (doc.y > doc.page.height - 120) doc.addPage();
   const y = doc.y;
   doc.save().rect(MARGIN, y + 1, 3, 12).fill(BRAND_INK).restore();
   doc
@@ -243,6 +259,9 @@ function drawTable(doc, rows) {
   if (pending) lines.push([pending]);
 
   lines.forEach((line, index) => {
+    // Rows are drawn as absolute rectangles, so pdfkit's own pagination does
+    // not see them coming; the break has to be asked for.
+    if (doc.y + rowHeight > doc.page.height - MARGIN) doc.addPage();
     const y = doc.y;
 
     if (index % 2 === 0) {
@@ -307,6 +326,7 @@ function drawObservationTable(doc, consciousness, observations) {
   ];
 
   rows.forEach((row, index) => {
+    if (doc.y + rowHeight > doc.page.height - MARGIN) doc.addPage();
     const y = doc.y;
     if (row.head) {
       doc.save().rect(MARGIN, y, width, rowHeight).fill('#F1E7D8').restore();
@@ -460,6 +480,7 @@ function drawPhoto(doc, photoBuffer) {
   try {
     const boxWidth = contentWidth(doc);
     const boxHeight = PHOTO_HEIGHT;
+    if (doc.y + boxHeight > doc.page.height - MARGIN) doc.addPage();
     const y = doc.y;
     doc.save().rect(MARGIN, y, boxWidth, boxHeight).fill('#111827').restore();
     doc.image(photoBuffer, MARGIN, y, {
@@ -566,7 +587,7 @@ export async function buildReportPDFBuffer(
   if (spoken) {
     scriptText(doc, spoken, MARGIN, doc.y, {
       width: contentWidth(doc),
-      height: 44,
+      height: CALLER_TEXT_HEIGHT,
       ellipsis: true,
       lineGap: 1,
     }, 10);
@@ -598,7 +619,7 @@ export async function buildReportPDFBuffer(
   doc.font('Helvetica').fontSize(9.5).fillColor(TEXT_DARK)
     .text(
       toEncodableText(conditions.length ? conditions.join('   ·   ') : 'No conditions suggested.'),
-      MARGIN, doc.y, { width: contentWidth(doc), height: 21, ellipsis: true },
+      MARGIN, doc.y, { width: contentWidth(doc), height: CLINICAL_TEXT_HEIGHT, ellipsis: true },
     );
   doc.moveDown(0.2);
   doc.font('Helvetica-Oblique').fontSize(8).fillColor(TEXT_GRAY)
@@ -621,7 +642,7 @@ export async function buildReportPDFBuffer(
   doc.font('Helvetica').fontSize(9.5).fillColor(TEXT_DARK)
     .text(
       toEncodableText(reportData.hospital_preparation || 'No further preparation notes.'),
-      MARGIN, doc.y, { width: contentWidth(doc), height: 21, ellipsis: true },
+      MARGIN, doc.y, { width: contentWidth(doc), height: CLINICAL_TEXT_HEIGHT, ellipsis: true },
     );
   divider(doc);
 
@@ -630,7 +651,7 @@ export async function buildReportPDFBuffer(
   doc.font('Helvetica').fontSize(9.5).fillColor(TEXT_DARK)
     .text(
       toEncodableText(reportData.first_aid_suggestion || 'No first aid guidance recorded.'),
-      MARGIN, doc.y, { width: contentWidth(doc), height: 21, ellipsis: true },
+      MARGIN, doc.y, { width: contentWidth(doc), height: CLINICAL_TEXT_HEIGHT, ellipsis: true },
     );
   divider(doc);
 
