@@ -234,14 +234,23 @@ export async function loginHospitalAdmin({ email, password }) {
   const ok = await verifyPassword(email, password);
   if (!ok) throw new Error('Invalid email or password');
 
-  // Hospital admins are looked up by their (unique) login email.
+  // Hospital admins, camp admins and ResQPK admins all sign in by their
+  // (unique) login email at this one door. Which of the three they are decides
+  // what the dashboard shows them, and the token carries the role rather than
+  // the dashboard deciding for itself.
   const { data: user } = await supabaseAdmin
     .from('users')
     .select('*')
     .eq('email', email)
-    .eq('role', 'hospital_admin')
+    .in('role', ['hospital_admin', 'super_admin'])
     .maybeSingle();
   if (!user) throw new Error('Account not found or not authorized');
+
+  if (user.role === 'super_admin') {
+    // No facility of their own; they oversee everyone else's.
+    const token = signToken({ id: user.id, auth_id: user.auth_id, role: 'super_admin', email });
+    return { user, hospital: null, token };
+  }
 
   const { data: hospital } = await supabaseAdmin
     .from('hospitals')

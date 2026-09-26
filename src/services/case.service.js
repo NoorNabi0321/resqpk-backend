@@ -3,6 +3,7 @@
 import { supabaseAdmin } from '../config/supabase.js';
 import dispatchService from './dispatch.service.js';
 import mapsService from './maps.service.js';
+import { dispatchable } from './dispatchable-hospitals.js';
 import hospitalAssignment from './hospital-assignment.service.js';
 import caseTokenService from './case-token.service.js';
 import whatsappNotifier from './whatsapp/notifier.js';
@@ -27,11 +28,9 @@ export async function createSOS({
   channel = 'app',
 }) {
   // Nearest emergency-capable hospital — returned only as a suggestion.
-  const { data: hospitals } = await supabaseAdmin
-    .from('hospitals')
-    .select('*')
-    .eq('has_emergency_ward', true)
-    .eq('is_active', true);
+  const { data: hospitals } = await dispatchable(
+    supabaseAdmin.from('hospitals').select('*'),
+  );
   const nearestHospital = mapsService.findNearestHospital(lat, lng, hospitals || []);
 
   // The tracking link is issued now rather than on driver assignment: a
@@ -541,11 +540,11 @@ export async function getCaseRoute(caseId, requester) {
 
 // 6c. Emergency-capable hospitals nearest to a point (for "change hospital").
 export async function listNearbyHospitals({ lat, lng }) {
-  const { data: hospitals, error } = await supabaseAdmin
-    .from('hospitals')
-    .select('id, name, short_name, address, lat, lng, emergency_phone, has_emergency_ward, is_active')
-    .eq('is_active', true)
-    .eq('has_emergency_ward', true);
+  const { data: hospitals, error } = await dispatchable(
+    supabaseAdmin
+      .from('hospitals')
+      .select('id, name, short_name, address, lat, lng, emergency_phone, has_emergency_ward, is_active'),
+  );
   if (error) throw new Error(error.message);
 
   return (hospitals || [])

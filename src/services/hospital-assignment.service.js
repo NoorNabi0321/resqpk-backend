@@ -9,6 +9,7 @@
 // a different one, and the automatic fallback for a patient who never answered.
 import { supabaseAdmin } from '../config/supabase.js';
 import mapsService from './maps.service.js';
+import { dispatchable, whyNotDispatchable } from './dispatchable-hospitals.js';
 import whatsappNotifier from './whatsapp/notifier.js';
 import { getIO } from '../socket/socket.server.js';
 import { EVENTS, ROOMS } from '../socket/socket.events.js';
@@ -56,11 +57,11 @@ export async function assignHospitalToCase({ caseId, hospitalId, source = 'patie
 
   const { data: hospital } = await supabaseAdmin
     .from('hospitals')
-    .select('id, name, lat, lng, is_active, has_emergency_ward')
+    .select('id, name, lat, lng, is_active, is_approved, facility_type, has_emergency_ward')
     .eq('id', hospitalId)
     .maybeSingle();
-  if (!hospital || !hospital.is_active) throw new Error('Hospital not found');
-  if (!hospital.has_emergency_ward) throw new Error('Hospital has no emergency ward');
+  const refusal = whyNotDispatchable(hospital);
+  if (refusal) throw new Error(refusal);
 
   const summary = {
     caseId,
@@ -135,11 +136,9 @@ export async function autoAssignNearestHospital(caseId) {
     .maybeSingle();
   if (!emergencyCase || emergencyCase.hospital_id) return null;
 
-  const { data: hospitals } = await supabaseAdmin
-    .from('hospitals')
-    .select('*')
-    .eq('has_emergency_ward', true)
-    .eq('is_active', true);
+  const { data: hospitals } = await dispatchable(
+    supabaseAdmin.from('hospitals').select('*'),
+  );
 
   const nearest = mapsService.findNearestHospital(
     Number(emergencyCase.patient_lat),
