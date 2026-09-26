@@ -101,4 +101,18 @@ export async function campRoute(req, res) {
   }
 }
 
-export default { registerCamp, nearbyCamps, campDashboard, campDetails, campRoute };
+// PUT /api/camps/dashboard/me (camp admin)
+export async function updateMyCamp(req, res) {
+  try {
+    const campId = req.user?.hospital_id;
+    if (!campId) return errorResponse(res, 'This account is not linked to a camp', 400);
+    const data = await campService.updateCampProfile(campId, req.body || {});
+    return successResponse(res, data, 'Camp updated', 200);
+  } catch (err) {
+    return errorResponse(res, err.message, 400);
+  }
+}
+
+export default {
+  registerCamp, nearbyCamps, campDashboard, campDetails, campRoute, updateMyCamp,
+};

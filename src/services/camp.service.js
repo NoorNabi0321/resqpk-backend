@@ -222,4 +222,94 @@ export async function getCampDashboardData(campId) {
   };
 }
 
-export default { registerCamp, getNearbyCamps, getCampDetails, getCampDashboardData };
+/**
+ * A camp correcting its own details.
+ *
+ * Dates run out, a service gets added, the tent moves to the other end of the
+ * ground. Until now none of that could be fixed without an administrator
+ * editing the database, so a camp whose dates had passed simply vanished from
+ * the app with nothing it could do about it.
+ *
+ * What a camp may not change about itself: whether it is approved, whether it
+ * is a camp at all, and whose account owns it.
+ */
+export async function updateCampProfile(campId, input = {}) {
+  const { data: existing } = await supabaseAdmin
+    .from('hospitals')
+    .select('id, facility_type')
+    .eq('id', campId)
+    .maybeSingle();
+  if (!existing) throw new Error('Camp not found');
+  if (existing.facility_type !== 'medical_camp') {
+    throw new Error('This account is not a medical camp');
+  }
+
+  const patch = {};
+  const text = (v) => (v == null ? null : String(v).trim() || null);
+
+  if ('campName' in input) {
+    const name = text(input.campName);
+    if (!name) throw new Error('Camp name is required');
+    patch.name = name;
+    patch.short_name = name.slice(0, 30);
+  }
+  if ('organizerName' in input) {
+    const organizer = text(input.organizerName);
+    if (!organizer) throw new Error('Organizer name is required');
+    patch.organizer_name = organizer;
+  }
+  if ('description' in input) patch.description = text(input.description);
+  if ('address' in input) patch.address = text(input.address);
+  if ('contactPhone' in input) patch.emergency_phone = text(input.contactPhone);
+
+  if ('servicesOffered' in input) {
+    const services = Array.isArray(input.servicesOffered)
+      ? input.servicesOffered.map(text).filter(Boolean)
+      : [];
+    if (services.length === 0) throw new Error('At least one service must be offered');
+    patch.services_offered = services;
+  }
+
+  if ('startDate' in input || 'endDate' in input) {
+    const start = toDateOnly(input.startDate);
+    const end = toDateOnly(input.endDate);
+    if (!start || !end) throw new Error('Valid start and end dates are required');
+    if (start > end) throw new Error('Start date must be on or before the end date');
+    patch.camp_start_date = start;
+    patch.camp_end_date = end;
+  }
+
+  if ('lat' in input || 'lng' in input) {
+    const latNum = Number(input.lat);
+    const lngNum = Number(input.lng);
+    if (!Number.isFinite(latNum) || !Number.isFinite(lngNum)) {
+      throw new Error('Valid coordinates are required');
+    }
+    if (
+      latNum < PK_BOUNDS.minLat || latNum > PK_BOUNDS.maxLat
+      || lngNum < PK_BOUNDS.minLng || lngNum > PK_BOUNDS.maxLng
+    ) {
+      throw new Error('Coordinates must be within Pakistan');
+    }
+    patch.lat = latNum;
+    patch.lng = lngNum;
+  }
+
+  if ('isActive' in input) patch.is_active = input.isActive === true;
+
+  if (Object.keys(patch).length === 0) throw new Error('Nothing to update');
+
+  const { error } = await supabaseAdmin.from('hospitals').update(patch).eq('id', campId);
+  if (error) throw new Error(error.message);
+
+  logger.info(`Camp ${campId} updated its own profile`);
+  return getCampDashboardData(campId);
+}
+
+export default {
+  registerCamp,
+  getNearbyCamps,
+  getCampDetails,
+  getCampDashboardData,
+  updateCampProfile,
+};

@@ -202,6 +202,42 @@ try {
   });
   check('the owning camp can edit it', r.json?.data?.needsFollowup === false);
 
+  // --- camp editing its own profile ----------------------------------------
+  console.log('\nCamp profile');
+
+  r = await api('/api/camps/dashboard/me', {
+    token: campAToken, method: 'PUT',
+    body: { campName: `E2E Camp A renamed ${stamp}`, servicesOffered: ['Eye checkup', 'Free glasses'] },
+  });
+  check('a camp can rename itself and change its services',
+    r.json?.data?.camp?.servicesOffered?.length === 2, r.json?.data?.camp?.name);
+
+  r = await api('/api/camps/dashboard/me', {
+    token: campAToken, method: 'PUT', body: { servicesOffered: [] },
+  });
+  check('a camp cannot remove every service', r.status === 400, r.json?.message);
+
+  r = await api('/api/camps/dashboard/me', {
+    token: campAToken, method: 'PUT', body: { startDate: '2026-10-10', endDate: '2026-10-01' },
+  });
+  check('end before start is refused', r.status === 400, r.json?.message);
+
+  r = await api('/api/camps/dashboard/me', {
+    token: campAToken, method: 'PUT', body: { lat: 51.5, lng: -0.12 },
+  });
+  check('a pin outside Pakistan is refused', r.status === 400, r.json?.message);
+
+  r = await api('/api/camps/dashboard/me', {
+    token: campAToken, method: 'PUT', body: { isApproved: true, facility_type: 'hospital' },
+  });
+  check('a camp cannot approve itself or become a hospital',
+    r.status === 400 || r.json?.data?.camp !== undefined, r.json?.message || 'ignored');
+
+  // The route is hospital_admin only, so an administrator is turned away by
+  // the role guard before the controller ever looks for a camp.
+  r = await api('/api/camps/dashboard/me', { token: adminToken });
+  check('an admin cannot open a camp dashboard', r.status === 403, `HTTP ${r.status}`);
+
   r = await api('/api/camp-visits/export.csv', { token: campAToken });
   check('CSV export', r.status === 200 && r.text.includes('Fatima Bibi'),
     `${r.text.split('\r\n').length - 1} rows`);
