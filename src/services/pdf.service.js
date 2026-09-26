@@ -8,6 +8,7 @@
 // need ready, and what do I already know about this patient.
 import fs from 'fs';
 import path from 'path';
+import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 
 import PDFDocument from 'pdfkit';
@@ -33,6 +34,21 @@ const BRAND_INK = '#C2410C';
 const MARGIN = 46;
 const HEADER_HEIGHT = 92;
 
+// --- The one-page budget ----------------------------------------------------
+//
+// This report is printed and clipped to a chart, and a receiving ward reads
+// the sheet in front of it. A second page is a page that gets left on the
+// printer. So the layout has no addPage anywhere, and every section that grows
+// with the data is capped: lists are truncated, paragraphs are clamped with
+// ellipsis, and the resource line shrinks its own type to fit.
+//
+// These numbers are what fits an A4 page with the photo. one-page.test.mjs
+// renders the extremes — a report with everything, long text in every field —
+// and fails if the result is more than one page.
+const PHOTO_HEIGHT = 96;
+const MAX_OBSERVATIONS = 5;
+const MAX_CONDITIONS = 5;
+
 const LOGO_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), '../assets/resqpk-logo.png');
 let logoBuffer;
 try {
@@ -51,11 +67,62 @@ function titleCase(value) {
   return s ? s[0].toUpperCase() + s.slice(1) : '';
 }
 
-// PDFKit's built-in fonts are WinAnsi-encoded and cannot represent Urdu/Sindhi
-// script or emoji. Strip anything unencodable so a non-Latin transcription can
-// never crash report generation — the appendix documents the limitation.
+// --- Urdu and Sindhi --------------------------------------------------------
+//
+// PDFKit's built-in fonts are WinAnsi-encoded and have no Arabic glyphs, so
+// every Urdu character used to come out as "?". A whole spoken report read
+// "??????????????" and the appendix apologised for it.
+//
+// Noto Naskh Arabic is embedded instead. fontkit — which pdfkit already uses —
+// applies the Arabic shaper, so letters take their initial/medial/final forms
+// and the run is reordered right-to-left, while Latin words and digits inside
+// it keep their own direction. Verified by rendering: "میری والدہ 65 سال" comes
+// out shaped, in the right order, with 65 still reading 65.
+const require = createRequire(import.meta.url);
+
+const URDU_FONT = 'NotoNaskh';
+let urduFontPath = null;
+try {
+  urduFontPath = require.resolve(
+    '@expo-google-fonts/noto-naskh-arabic/400Regular/NotoNaskhArabic_400Regular.ttf',
+  );
+} catch {
+  // Missing font must never stop a report; Arabic text falls back to the
+  // stripping below, which is what the whole report used to do.
+  urduFontPath = null;
+}
+
+function registerFonts(doc) {
+  if (!urduFontPath) return false;
+  try {
+    doc.registerFont(URDU_FONT, urduFontPath);
+    return true;
+  } catch (err) {
+    logger.warn?.(`Urdu font unavailable, falling back to Latin: ${err.message}`);
+    return false;
+  }
+}
+
+// Arabic block (Urdu, Sindhi) plus its supplement and extended ranges.
+const ARABIC = /[؀-ۿݐ-ݿࢠ-ࣿﭐ-﷿ﹰ-﻿]/;
+
+function isArabicScript(value) {
+  return ARABIC.test(String(value ?? ''));
+}
+
+// Strip anything the built-in Latin fonts cannot encode. Only reached for text
+// that is not Arabic — Arabic now has a font of its own.
 function toEncodableText(value) {
-  const s = String(value ?? '').normalize('NFC');
+  const s = String(value ?? '')
+    .normalize('NFC')
+    // Typographic punctuation is outside Latin-1, so a model writing "Bell's
+    // palsy" with a curly apostrophe printed "Bell?s palsy". Fold it to ASCII
+    // before anything gets replaced with a question mark.
+    .replace(/[‘’‛]/g, "'")
+    .replace(/[“”]/g, '"')
+    .replace(/[–—]/g, '-')
+    .replace(/…/g, '...')
+    .replace(/[   ]/g, ' ');
   let out = '';
   for (const ch of s) {
     const c = ch.codePointAt(0);
@@ -66,6 +133,26 @@ function toEncodableText(value) {
     out += '?';                                                    // unencodable glyph
   }
   return out;
+}
+
+/**
+ * Text that renders in whichever script it happens to be written in.
+ *
+ * Arabic-script text gets the embedded font and right alignment, which is what
+ * makes the line read right-to-left. Everything else is unchanged.
+ */
+function scriptText(doc, value, x, y, options = {}, size = 10.5, color = TEXT_DARK) {
+  const raw = String(value ?? '');
+  const arabic = isArabicScript(raw) && urduFontPath;
+  doc
+    .font(arabic ? URDU_FONT : 'Helvetica')
+    .fontSize(arabic ? size + 0.5 : size)
+    .fillColor(color)
+    .text(arabic ? raw.normalize('NFC') : toEncodableText(raw), x, y, {
+      ...options,
+      align: arabic ? 'right' : (options.align || 'left'),
+    });
+  return arabic;
 }
 
 function formatDateTime(value) {
@@ -96,17 +183,16 @@ function contentWidth(doc) {
 }
 
 function divider(doc) {
-  doc.moveDown(0.5);
+  doc.moveDown(0.35);
   const y = doc.y;
   doc.save().strokeColor(RULE).lineWidth(1).moveTo(MARGIN, y).lineTo(doc.page.width - MARGIN, y)
     .stroke().restore();
-  doc.moveDown(0.5);
+  doc.moveDown(0.35);
 }
 
 function sectionHeading(doc, label) {
-  // Keep a heading with at least a line of its section rather than stranding it
-  // at the foot of a page.
-  if (doc.y > doc.page.height - 130) doc.addPage();
+  // The one-page budget is tight; PDF_TRACE=1 prints where each section lands.
+  if (process.env.PDF_TRACE) console.log(`  y=${doc.y.toFixed(0)}  ${label}`);
   const y = doc.y;
   doc.save().rect(MARGIN, y + 1, 3, 12).fill(BRAND_INK).restore();
   doc
@@ -119,35 +205,7 @@ function sectionHeading(doc, label) {
   doc.font('Helvetica').fontSize(11).fillColor(TEXT_DARK);
 }
 
-function bulletList(doc, items, emptyText) {
-  const list = (Array.isArray(items) ? items : []).filter(
-    (i) => i != null && String(i).trim() !== '',
-  );
-  if (!list.length) {
-    doc.font('Helvetica-Oblique').fontSize(10).fillColor(TEXT_GRAY).text(emptyText, MARGIN, doc.y);
-    doc.font('Helvetica').fontSize(11).fillColor(TEXT_DARK);
-    return;
-  }
-  doc.font('Helvetica').fontSize(11).fillColor(TEXT_DARK);
-  list.forEach((item) => {
-    doc.text(`•  ${toEncodableText(item)}`, MARGIN, doc.y, { width: contentWidth(doc) });
-    doc.moveDown(0.15);
-  });
-}
 
-function paragraph(doc, text, emptyText) {
-  const value = typeof text === 'string' ? text.trim() : '';
-  if (!value) {
-    doc.font('Helvetica-Oblique').fontSize(10).fillColor(TEXT_GRAY).text(emptyText, MARGIN, doc.y);
-    doc.font('Helvetica').fontSize(11).fillColor(TEXT_DARK);
-    return;
-  }
-  doc
-    .font('Helvetica')
-    .fontSize(11)
-    .fillColor(TEXT_DARK)
-    .text(toEncodableText(value), MARGIN, doc.y, { width: contentWidth(doc), align: 'left' });
-}
 
 /**
  * The facts table: two label/value pairs per row, ruled and banded.
@@ -185,7 +243,6 @@ function drawTable(doc, rows) {
   if (pending) lines.push([pending]);
 
   lines.forEach((line, index) => {
-    if (doc.y + rowHeight > doc.page.height - 70) doc.addPage();
     const y = doc.y;
 
     if (index % 2 === 0) {
@@ -232,6 +289,116 @@ function drawTable(doc, rows) {
   doc.moveDown(0.6);
 }
 
+/**
+ * Symptoms and observations, as a ruled table rather than a bullet list.
+ *
+ * One observation per row, numbered, with consciousness as the first row
+ * because it is the thing the ward triages on before it reads anything else.
+ */
+function drawObservationTable(doc, consciousness, observations) {
+  const width = contentWidth(doc);
+  const rowHeight = 15;
+  const numWidth = 22;
+  const padding = 7;
+
+  const rows = [
+    { label: 'Consciousness', value: consciousness, head: true },
+    ...observations.map((o, i) => ({ label: String(i + 1), value: o })),
+  ];
+
+  rows.forEach((row, index) => {
+    const y = doc.y;
+    if (row.head) {
+      doc.save().rect(MARGIN, y, width, rowHeight).fill('#F1E7D8').restore();
+    } else if (index % 2 === 0) {
+      doc.save().rect(MARGIN, y, width, rowHeight).fill(TABLE_FILL).restore();
+    }
+
+    // The header row's left cell stays empty: "STATE" wrapped inside a 22pt
+    // column and its second line landed on top of observation 1.
+    if (!row.head) {
+      doc
+        .font('Helvetica')
+        .fontSize(9)
+        .fillColor(TEXT_GRAY)
+        .text(row.label, MARGIN + padding, y + 4.5, { width: numWidth, lineBreak: false });
+    }
+
+    doc
+      .font(row.head ? 'Helvetica-Bold' : 'Helvetica')
+      .fontSize(9.5)
+      .fillColor(TEXT_DARK)
+      .text(
+        toEncodableText(row.head ? `${row.label}: ${row.value}` : row.value),
+        MARGIN + padding + numWidth,
+        y + 4.5,
+        { width: width - numWidth - padding * 2, height: rowHeight - 6, lineBreak: false, ellipsis: true },
+      );
+
+    doc.save().strokeColor(RULE).lineWidth(0.5)
+      .moveTo(MARGIN, y + rowHeight).lineTo(MARGIN + width, y + rowHeight).stroke().restore();
+    doc.y = y + rowHeight;
+  });
+
+  doc.x = MARGIN;
+}
+
+/**
+ * What the hospital should have waiting — one line of red chips split by "|".
+ *
+ * A line rather than a stack: it is four or five words that must be taken in
+ * at a glance by someone walking, and stacked boxes pushed the rest of the
+ * report onto a second page.
+ */
+function drawResourceLine(doc, items) {
+  const width = contentWidth(doc);
+  const SEP = '  |  ';
+  const padX = 7;
+  const boxHeight = 19;
+
+  // Shrink to fit rather than wrap. Below the floor, drop the tail into a
+  // "+n more" chip so nothing is silently lost.
+  let size = 10;
+  let shown = items;
+  const measure = (list, fontSize) => {
+    doc.font('Helvetica-Bold').fontSize(fontSize);
+    return list.reduce(
+      (sum, item, i) => sum + doc.widthOfString(toEncodableText(item)) + padX * 2
+        + (i ? doc.widthOfString(SEP) : 0),
+      0,
+    );
+  };
+
+  while (measure(shown, size) > width && size > 7.5) size -= 0.5;
+  while (measure(shown, size) > width && shown.length > 1) {
+    shown = shown.slice(0, -1);
+    const more = items.length - shown.length;
+    if (measure([...shown, `+${more} more`], size) <= width) {
+      shown = [...shown, `+${more} more`];
+      break;
+    }
+  }
+
+  const y = doc.y;
+  let x = MARGIN;
+  shown.forEach((item, i) => {
+    if (i) {
+      doc.font('Helvetica-Bold').fontSize(size).fillColor('#D9C9B4')
+        .text(SEP, x, y + 5, { lineBreak: false });
+      x += doc.widthOfString(SEP);
+    }
+    doc.font('Helvetica-Bold').fontSize(size);
+    const w = doc.widthOfString(toEncodableText(item)) + padX * 2;
+    doc.save().roundedRect(x, y, w, boxHeight, 4).fill('#FDECEC').restore();
+    doc.font('Helvetica-Bold').fontSize(size).fillColor('#D62828')
+      .text(toEncodableText(item), x + padX, y + 5.5, { lineBreak: false });
+    x += w;
+  });
+
+  doc.x = MARGIN;
+  doc.y = y + boxHeight + 5;
+}
+
 // Brand band across the top of page 1, coloured by urgency.
 function drawHeaderBand(doc, caseData, reportData, color) {
   doc.save().rect(0, 0, doc.page.width, HEADER_HEIGHT).fill(color).restore();
@@ -258,14 +425,11 @@ function drawHeaderBand(doc, caseData, reportData, color) {
     .font('Helvetica')
     .fontSize(9.5)
     .fillColor('#FFFFFF')
-    .text(
-      `Case ${toEncodableText(caseData?.case_number || 'Unknown')}`
-        + `${caseData?.access_code ? `   ·   Code ${toEncodableText(caseData.access_code)}` : ''}`
-        + `   ·   Generated ${formatDateTime()}`,
-      textX,
-      50,
-      { width: doc.page.width - textX - MARGIN },
-    );
+    // Case number and access code are gone by request. They are the patient's
+    // handle on their own case, not something the receiving ward acts on.
+    .text(`Generated ${formatDateTime()}`, textX, 50, {
+      width: doc.page.width - textX - MARGIN,
+    });
 
   const level = String(reportData?.urgency_level || 'unknown').toUpperCase();
   doc
@@ -295,9 +459,7 @@ function drawPhoto(doc, photoBuffer) {
   if (!photoBuffer) return;
   try {
     const boxWidth = contentWidth(doc);
-    const boxHeight = 200;
-    if (doc.y + boxHeight > doc.page.height - 90) doc.addPage();
-
+    const boxHeight = PHOTO_HEIGHT;
     const y = doc.y;
     doc.save().rect(MARGIN, y, boxWidth, boxHeight).fill('#111827').restore();
     doc.image(photoBuffer, MARGIN, y, {
@@ -368,30 +530,24 @@ export async function buildReportPDFBuffer(
     doc.on('error', reject);
   });
 
+  registerFonts(doc);
   drawHeaderBand(doc, caseData, reportData, color);
 
   // 1. THE FACTS — who, where, when, and who is bringing them.
   sectionHeading(doc, 'Case details');
-  const reachOn = caseData.reporter_phone || caseData.patient_phone;
+  // Trimmed to what the receiving ward acts on. Reached on, Reported by,
+  // Channel, SOS at and Coordinates were dropped by request: the crew already
+  // has the phone and the pin, and the ward reads the address.
   drawTable(doc, [
     ['Patient', caseData.patient_name || caseData.reporter_name || 'Not given'],
-    ['Age / sex', [
-      medicalProfile?.age ? `${medicalProfile.age} yrs` : null,
-      titleCase(medicalProfile?.gender) || null,
-    ].filter(Boolean).join('  ·  ') || 'Not on file'],
+    ['Age', medicalProfile?.age ? `${medicalProfile.age} years` : 'Not on file'],
+    ['Gender', titleCase(medicalProfile?.gender) || 'Not on file'],
     ['Blood group', medicalProfile?.blood_group || 'Not on file'],
-    ['Reached on', reachOn || 'No number on file'],
-    ['Reported by', caseData.reported_for === 'other' ? 'A bystander' : 'The patient'],
-    ['Channel', titleCase(caseData.channel) || 'App'],
-    ['SOS at', formatDateTime(caseData.sos_triggered_at)],
     ['Report at', formatDateTime()],
-    ['Pickup', caseData.patient_address || 'Address not available', { span: true }],
-    ['Coordinates', caseData.patient_lat && caseData.patient_lng
-      ? `${Number(caseData.patient_lat).toFixed(5)}, ${Number(caseData.patient_lng).toFixed(5)}`
-      : 'Not recorded'],
     ['Ambulance', caseData.driver_name
       ? `${caseData.driver_name}${caseData.vehicle_number ? ` (${caseData.vehicle_number})` : ''}`
       : 'Not yet assigned'],
+    ['Pickup', caseData.patient_address || 'Address not available', { span: true }],
     ['Destination', caseData.hospital_name || 'Not yet chosen', { span: true }],
   ]);
 
@@ -401,64 +557,84 @@ export async function buildReportPDFBuffer(
     drawPhoto(doc, photoBuffer);
   }
 
-  // 3. WHAT HAPPENED — in the caller's own words, then the assessment.
+  // 3. WHAT HAPPENED — in the caller's own words, in the script they used.
+  //    The old appendix repeated this same text on a page of its own, because
+  //    this section could only render "?". With a font it can, so the
+  //    duplicate page is gone.
   sectionHeading(doc, 'What the caller described');
-  paragraph(
-    doc,
-    reportData.transcribed_text || reportData.input_text,
-    'Nothing was said or typed — this report is based on the photo alone.',
-  );
+  const spoken = String(reportData.transcribed_text || reportData.input_text || '').trim();
+  if (spoken) {
+    scriptText(doc, spoken, MARGIN, doc.y, {
+      width: contentWidth(doc),
+      height: 44,
+      ellipsis: true,
+      lineGap: 1,
+    }, 10);
+  } else {
+    doc.font('Helvetica-Oblique').fontSize(9.5).fillColor(TEXT_GRAY)
+      .text('Nothing was said or typed — this report is based on the photo alone.', MARGIN, doc.y);
+  }
+  doc.x = MARGIN;
   divider(doc);
 
+  // 4. THE ASSESSMENT — consciousness and observations in one ruled table.
   sectionHeading(doc, 'Symptoms and observations');
-  doc.font('Helvetica-Bold').fontSize(10).fillColor(TEXT_SOFT)
-    .text(`Consciousness: ${titleCase(reportData.consciousness_state) || 'Unknown'}`, MARGIN, doc.y);
-  doc.moveDown(0.35);
-  bulletList(doc, reportData.key_observations, 'No specific observations recorded.');
-  doc.moveDown(0.4);
-  doc.font('Helvetica-Bold').fontSize(9.5).fillColor(TEXT_GRAY)
-    .text('POSSIBLE CONDITIONS', MARGIN, doc.y);
-  doc.moveDown(0.25);
-  bulletList(doc, reportData.possible_conditions, 'No conditions suggested.');
-  doc.moveDown(0.25);
-  doc.font('Helvetica-Oblique').fontSize(8.5).fillColor(TEXT_GRAY)
+  const observations = (Array.isArray(reportData.key_observations)
+    ? reportData.key_observations : [])
+    .filter((o) => o != null && String(o).trim() !== '')
+    .slice(0, MAX_OBSERVATIONS);
+  drawObservationTable(
+    doc,
+    titleCase(reportData.consciousness_state) || 'Unknown',
+    observations.length ? observations : ['No specific observations recorded.'],
+  );
+  doc.moveDown(0.5);
+
+  const conditions = (Array.isArray(reportData.possible_conditions)
+    ? reportData.possible_conditions : []).filter(Boolean).slice(0, MAX_CONDITIONS);
+  doc.font('Helvetica-Bold').fontSize(8.5).fillColor(TEXT_GRAY)
+    .text('POSSIBLE CONDITIONS', MARGIN, doc.y, { characterSpacing: 0.5 });
+  doc.moveDown(0.2);
+  doc.font('Helvetica').fontSize(9.5).fillColor(TEXT_DARK)
+    .text(
+      toEncodableText(conditions.length ? conditions.join('   ·   ') : 'No conditions suggested.'),
+      MARGIN, doc.y, { width: contentWidth(doc), height: 21, ellipsis: true },
+    );
+  doc.moveDown(0.2);
+  doc.font('Helvetica-Oblique').fontSize(8).fillColor(TEXT_GRAY)
     .text('AI assessment from the caller\'s description — clinical judgment required.', MARGIN, doc.y);
   divider(doc);
 
-  // 4. THE ASK — what this hospital should have waiting. The whole point of
+  // 5. THE ASK — what this hospital should have waiting. The whole point of
   //    sending the report ahead of the ambulance.
   const resources = Array.isArray(reportData.resources_needed)
     ? reportData.resources_needed.filter(Boolean)
     : [];
-  // Keep the list whole. Split across a page break, the ward sees "trauma bay"
-  // and has to turn over to find the blood.
-  if (doc.y + 34 + resources.length * 24 > doc.page.height - 90) doc.addPage();
   sectionHeading(doc, 'Have ready on arrival');
   if (resources.length) {
-    const width = contentWidth(doc);
-    resources.forEach((item) => {
-      if (doc.y + 22 > doc.page.height - 80) doc.addPage();
-      const y = doc.y;
-      doc.save().roundedRect(MARGIN, y, width, 20, 5).fill('#FDECEC').restore();
-      doc.font('Helvetica-Bold').fontSize(10.5).fillColor('#D62828')
-        .text(toEncodableText(item), MARGIN + 8, y + 5.5, { width: width - 16, lineBreak: false });
-      doc.y = y + 24;
-    });
-    doc.x = MARGIN;
+    drawResourceLine(doc, resources);
   } else {
-    doc.font('Helvetica-Oblique').fontSize(10).fillColor(TEXT_GRAY)
+    doc.font('Helvetica-Oblique').fontSize(9.5).fillColor(TEXT_GRAY)
       .text('No specific resources identified.', MARGIN, doc.y);
+    doc.moveDown(0.3);
   }
-  doc.moveDown(0.4);
-  paragraph(doc, reportData.hospital_preparation, 'No further preparation notes.');
+  doc.font('Helvetica').fontSize(9.5).fillColor(TEXT_DARK)
+    .text(
+      toEncodableText(reportData.hospital_preparation || 'No further preparation notes.'),
+      MARGIN, doc.y, { width: contentWidth(doc), height: 21, ellipsis: true },
+    );
   divider(doc);
 
-  // 5. FIRST AID — what was done, or should be, before arrival.
+  // 6. FIRST AID — what was done, or should be, before arrival.
   sectionHeading(doc, 'First aid given or advised');
-  paragraph(doc, reportData.first_aid_suggestion, 'No first aid guidance recorded.');
+  doc.font('Helvetica').fontSize(9.5).fillColor(TEXT_DARK)
+    .text(
+      toEncodableText(reportData.first_aid_suggestion || 'No first aid guidance recorded.'),
+      MARGIN, doc.y, { width: contentWidth(doc), height: 21, ellipsis: true },
+    );
   divider(doc);
 
-  // 6. HISTORY — what we already knew about this patient.
+  // 7. HISTORY — what we already knew about this patient.
   sectionHeading(doc, 'Known medical history');
   const meds = Array.isArray(reportData.medications_mentioned)
     ? reportData.medications_mentioned.filter(Boolean)
@@ -467,25 +643,8 @@ export async function buildReportPDFBuffer(
     ['Conditions', listOrDash(medicalProfile?.chronic_conditions)],
     ['Allergies', listOrDash(medicalProfile?.allergies)],
     ['Medicines', listOrDash(meds, 'None mentioned')],
-    ['Profile', medicalProfile ? 'From the patient\'s account' : 'No account — nothing on file'],
+    ['Profile', medicalProfile ? 'From the patient\'s account' : 'No account on file'],
   ]);
-
-  // APPENDIX — original transcription, on its own page.
-  const transcript = typeof reportData.transcribed_text === 'string'
-    ? reportData.transcribed_text.trim()
-    : '';
-  if (transcript) {
-    doc.addPage();
-    const lang = String(reportData.input_language || 'unknown');
-    sectionHeading(doc, `Original input (${toEncodableText(lang)})`);
-    if (lang === 'ur' || lang === 'sd') {
-      doc.font('Helvetica-Oblique').fontSize(9).fillColor(TEXT_GRAY)
-        .text('[Spoken in Urdu/Sindhi — the app shows the original script]', MARGIN, doc.y);
-      doc.moveDown(0.5);
-    }
-    doc.font('Helvetica').fontSize(10).fillColor(TEXT_DARK)
-      .text(toEncodableText(transcript), MARGIN, doc.y, { width: contentWidth(doc) });
-  }
 
   drawFooters(doc);
   doc.end();

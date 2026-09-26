@@ -19,6 +19,7 @@
   "author": "Noor Nabi",
   "license": "MIT",
   "dependencies": {
+    "@expo-google-fonts/noto-naskh-arabic": "^0.4.5",
     "@supabase/supabase-js": "^2.108.2",
     "axios": "^1.18.0",
     "bcryptjs": "^3.0.3",
