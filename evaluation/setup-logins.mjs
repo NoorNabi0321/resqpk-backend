@@ -74,12 +74,41 @@ if (!adminEmail || tooShort(adminPassword)) {
     .from('users').select('id, auth_id, email, role').eq('email', adminEmail).maybeSingle();
 
   if (existing) {
+    // Refuse to take over an account that belongs to a person using the app.
+    //
+    // Promoting one is not a small thing: patient login filters on
+    // role = 'patient', so the account stops being able to sign in to the
+    // mobile app at all, and its medical profile and case history end up
+    // hanging off an administrator. This script did exactly that to a real
+    // patient account whose email happened to match.
     if (existing.role !== 'super_admin') {
-      await supabaseAdmin.from('users').update({ role: 'super_admin' }).eq('id', existing.id);
+      const [{ count: profiles }, { count: driverRows }, { count: cases }] = await Promise.all([
+        supabaseAdmin.from('medical_profiles')
+          .select('id', { count: 'exact', head: true }).eq('user_id', existing.id),
+        supabaseAdmin.from('drivers')
+          .select('id', { count: 'exact', head: true }).eq('user_id', existing.id),
+        supabaseAdmin.from('emergency_cases')
+          .select('id', { count: 'exact', head: true }).eq('patient_id', existing.id),
+      ]);
+      const inUse = (profiles || 0) + (driverRows || 0) + (cases || 0);
+      if (inUse > 0) {
+        fail(
+          'ResQPK admin',
+          `${adminEmail} is already a ${existing.role} with ${inUse} record(s) of its own. `
+          + 'Use a different email for the admin — promoting this one would lock it out '
+          + 'of the app it belongs to.',
+        );
+      }
     }
-    const problem = await setPassword(existing, adminPassword);
-    if (problem) fail('ResQPK admin', problem);
-    else done('ResQPK admin', `${adminEmail} — password set`);
+
+    if (!results.some((r) => !r.ok && r.what === 'ResQPK admin')) {
+      if (existing.role !== 'super_admin') {
+        await supabaseAdmin.from('users').update({ role: 'super_admin' }).eq('id', existing.id);
+      }
+      const problem = await setPassword(existing, adminPassword);
+      if (problem) fail('ResQPK admin', problem);
+      else done('ResQPK admin', `${adminEmail} — password set`);
+    }
   } else {
     const { data: authUser, error } = await supabaseAdmin.auth.admin.createUser({
       email: adminEmail, password: adminPassword, email_confirm: true,
