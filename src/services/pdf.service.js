@@ -25,6 +25,7 @@ const URGENCY_COLORS = Object.freeze({
 
 // Same palette as the apps, so a printed report and the dashboard agree.
 const TEXT_DARK = '#1C1917';
+const CRITICAL = '#D62828';
 const TEXT_SOFT = '#57534E';
 const TEXT_GRAY = '#78716C';
 const RULE = '#E5D9C9';
@@ -32,7 +33,7 @@ const TABLE_FILL = '#F7F0E6';
 const BRAND_INK = '#C2410C';
 
 const MARGIN = 46;
-const HEADER_HEIGHT = 92;
+const HEADER_HEIGHT = 78;
 
 // --- The page budget --------------------------------------------------------
 //
@@ -53,7 +54,7 @@ const HEADER_HEIGHT = 92;
 // silently and only for the data that happens to be long, so
 // evaluation/pdf-one-page.mjs renders both a realistic report and a
 // deliberately absurd one: the first must be one page, the second at most two.
-const PHOTO_HEIGHT = 124;
+const PHOTO_MAX_HEIGHT = 118;
 const MAX_OBSERVATIONS = 10;
 const MAX_CONDITIONS = 8;
 
@@ -439,8 +440,9 @@ function drawObservationTable(doc, consciousness, observations) {
  * at a glance by someone walking, and stacked boxes pushed the rest of the
  * report onto a second page.
  */
-function drawResourceLine(doc, items) {
-  const width = contentWidth(doc);
+function drawResourceLine(doc, items, opts = {}) {
+  const originX = opts.x ?? MARGIN;
+  const width = opts.width ?? contentWidth(doc);
   const SEP = '  |  ';
   const padX = 7;
   const boxHeight = 19;
@@ -469,7 +471,7 @@ function drawResourceLine(doc, items) {
   }
 
   const y = doc.y;
-  let x = MARGIN;
+  let x = originX;
   shown.forEach((item, i) => {
     if (i) {
       doc.font('Helvetica-Bold').fontSize(size).fillColor('#D9C9B4')
@@ -478,14 +480,120 @@ function drawResourceLine(doc, items) {
     }
     doc.font('Helvetica-Bold').fontSize(size);
     const w = doc.widthOfString(toEncodableText(item)) + padX * 2;
-    doc.save().roundedRect(x, y, w, boxHeight, 4).fill('#FDECEC').restore();
-    doc.font('Helvetica-Bold').fontSize(size).fillColor('#D62828')
+    doc.save().roundedRect(x, y, w, boxHeight, 4)
+      .fill(opts.onTint ? '#FFFFFF' : '#FDECEC').restore();
+    doc.font('Helvetica-Bold').fontSize(size).fillColor(CRITICAL)
       .text(toEncodableText(item), x + padX, y + 5.5, { lineBreak: false });
     x += w;
   });
 
-  doc.x = MARGIN;
+  doc.x = originX;
   doc.y = y + boxHeight + 5;
+}
+
+
+// --- The rebuilt layout -----------------------------------------------------
+
+/**
+ * One line of facts, with the blanks left out.
+ *
+ * The old table printed "Not on file" in a row of its own for every field
+ * nobody had filled in — five of them on a walk-in case, five lines of nothing
+ * sitting above the clinical detail. What is unknown is simply not said.
+ */
+function drawFactLine(doc, facts, { x = MARGIN, gap = 14 } = {}) {
+  const shown = facts.filter((f) => f && f.value != null && String(f.value).trim() !== '');
+  if (!shown.length) return;
+
+  const y = doc.y;
+  let cursor = x;
+  shown.forEach((fact, index) => {
+    if (index) {
+      doc.font('Helvetica').fontSize(12).fillColor('#CFC4B2')
+        .text('|', cursor, y - 1, { lineBreak: false });
+      cursor += doc.widthOfString('|') + gap / 2;
+    }
+    doc.font('Helvetica').fontSize(8).fillColor(TEXT_GRAY)
+      .text(fact.label.toUpperCase(), cursor, y, { lineBreak: false, characterSpacing: 0.4 });
+    const labelWidth = doc.widthOfString(fact.label.toUpperCase()) + 5;
+    doc.font('Helvetica-Bold').fontSize(10.5).fillColor(TEXT_DARK)
+      .text(toEncodableText(fact.value), cursor + labelWidth, y - 2.5, { lineBreak: false });
+    cursor += labelWidth + doc.widthOfString(toEncodableText(fact.value)) + gap / 2;
+  });
+
+  doc.x = MARGIN;
+  doc.y = y + 16;
+}
+
+/**
+ * The band that answers "how bad, and when" before anything else is read.
+ */
+function drawUrgencyBand(doc, reportData, caseData, color) {
+  const width = contentWidth(doc);
+  const height = 46;
+  const y = doc.y;
+
+  doc.save().roundedRect(MARGIN, y, width, height, 8).fill(color).restore();
+
+  const level = String(reportData?.urgency_level || 'unknown').toUpperCase();
+  doc.font('Helvetica-Bold').fontSize(9).fillColor('#FFFFFF')
+    .text(level, MARGIN + 14, y + 9, { characterSpacing: 1, lineBreak: false });
+  doc.font('Helvetica-Bold').fontSize(16).fillColor('#FFFFFF')
+    .text(titleCase(reportData?.emergency_type) || 'Type not determined',
+      MARGIN + 14, y + 21, { width: width - 180, lineBreak: false });
+
+  // Arrival, right-aligned — the fact a ward plans around.
+  const eta = Number(caseData?.eta_minutes);
+  const label = Number.isFinite(eta) ? `~${eta} min` : 'En route';
+  const sub = Number.isFinite(eta) ? 'to arrival' : 'arrival time unknown';
+  doc.font('Helvetica-Bold').fontSize(20).fillColor('#FFFFFF')
+    .text(label, MARGIN + width - 160, y + 8, { width: 146, align: 'right', lineBreak: false });
+  doc.font('Helvetica').fontSize(8).fillColor('#FFFFFF')
+    .text(sub, MARGIN + width - 160, y + 30, { width: 146, align: 'right', lineBreak: false });
+
+  doc.x = MARGIN;
+  doc.y = y + height + 14;
+}
+
+/** The ask, as the second thing on the page rather than the seventh. */
+function drawPrepareBlock(doc, resources, note) {
+  const width = contentWidth(doc);
+  const hasList = resources.length > 0;
+  const y = doc.y;
+
+  // Measure the note first so the panel can be drawn behind it in one go.
+  doc.font('Helvetica').fontSize(9.5);
+  const noteText = note ? toEncodableText(note) : '';
+  const noteHeight = noteText
+    ? Math.min(doc.heightOfString(noteText, { width: width - 28 }), 30)
+    : 0;
+  const height = 30 + (hasList ? 24 : 0) + (noteHeight ? noteHeight + 6 : 0);
+
+  doc.save()
+    .roundedRect(MARGIN, y, width, height, 8)
+    .fillAndStroke('#FDECEC', '#F3C9C9')
+    .restore();
+
+  doc.font('Helvetica-Bold').fontSize(8.5).fillColor(CRITICAL)
+    .text('HAVE READY ON ARRIVAL', MARGIN + 14, y + 10, { characterSpacing: 0.8 });
+
+  if (hasList) {
+    doc.y = y + 26;
+    doc.x = MARGIN + 14;
+    drawResourceLine(doc, resources, { x: MARGIN + 14, width: width - 28, onTint: true });
+  } else {
+    doc.font('Helvetica-Oblique').fontSize(9.5).fillColor(TEXT_GRAY)
+      .text('Nothing specific requested.', MARGIN + 14, y + 25);
+  }
+
+  if (noteText) {
+    doc.font('Helvetica').fontSize(9.5).fillColor(TEXT_DARK)
+      .text(noteText, MARGIN + 14, y + height - noteHeight - 8,
+        { width: width - 28, height: noteHeight, ellipsis: true });
+  }
+
+  doc.x = MARGIN;
+  doc.y = y + height + 14;
 }
 
 // Brand band across the top of page 1, coloured by urgency.
@@ -495,9 +603,9 @@ function drawHeaderBand(doc, caseData, reportData, color) {
   let textX = MARGIN;
   if (logoBuffer) {
     // White plate behind the mark so the logo reads on any urgency colour.
-    doc.save().roundedRect(MARGIN, 22, 48, 48, 10).fill('#FFFFFF').restore();
+    doc.save().roundedRect(MARGIN, 16, 46, 46, 10).fill('#FFFFFF').restore();
     try {
-      doc.image(logoBuffer, MARGIN + 6, 28, { fit: [36, 36] });
+      doc.image(logoBuffer, MARGIN + 6, 22, { fit: [34, 34] });
     } catch {
       /* unreadable logo — the band still works without it */
     }
@@ -508,7 +616,7 @@ function drawHeaderBand(doc, caseData, reportData, color) {
     .font('Helvetica-Bold')
     .fontSize(19)
     .fillColor('#FFFFFF')
-    .text('ResQPK Emergency Report', textX, 26, { width: doc.page.width - textX - MARGIN });
+    .text('ResQPK Emergency Report', textX, 22, { width: doc.page.width - textX - MARGIN });
 
   doc
     .font('Helvetica')
@@ -516,25 +624,16 @@ function drawHeaderBand(doc, caseData, reportData, color) {
     .fillColor('#FFFFFF')
     // Case number and access code are gone by request. They are the patient's
     // handle on their own case, not something the receiving ward acts on.
-    .text(`Generated ${formatDateTime()}`, textX, 50, {
+    .text(`Generated ${formatDateTime()}`, textX, 46, {
       width: doc.page.width - textX - MARGIN,
     });
 
-  const level = String(reportData?.urgency_level || 'unknown').toUpperCase();
-  doc
-    .font('Helvetica-Bold')
-    .fontSize(11)
-    .fillColor('#FFFFFF')
-    .text(
-      `${level} · ${toEncodableText(titleCase(reportData?.emergency_type) || 'Type not determined')}`,
-      textX,
-      67,
-      { width: doc.page.width - textX - MARGIN },
-    );
-
+  // The urgency and the emergency type used to be repeated here. They are the
+  // first thing in the band below, at a size worth reading, with the arrival
+  // time beside them — saying it twice only made the header louder.
   doc.fillColor(TEXT_DARK);
   doc.x = MARGIN;
-  doc.y = HEADER_HEIGHT + 18;
+  doc.y = HEADER_HEIGHT + 16;
 }
 
 /**
@@ -546,18 +645,36 @@ function drawHeaderBand(doc, caseData, reportData, color) {
  */
 function drawPhoto(doc, photoBuffer) {
   if (!photoBuffer) return;
+
+  const boxWidth = contentWidth(doc);
+  let drawWidth = boxWidth;
+  let drawHeight = PHOTO_MAX_HEIGHT;
+
   try {
-    const boxWidth = contentWidth(doc);
-    const boxHeight = PHOTO_HEIGHT;
-    if (doc.y + boxHeight > doc.page.height - MARGIN) doc.addPage();
-    const y = doc.y;
-    doc.save().rect(MARGIN, y, boxWidth, boxHeight).fill('#111827').restore();
-    doc.image(photoBuffer, MARGIN, y, {
-      fit: [boxWidth, boxHeight],
-      align: 'center',
-      valign: 'center',
-    });
-    doc.y = y + boxHeight + 4;
+    // Size the frame to the picture rather than the picture to the frame. A
+    // fixed box letterboxed a phone photo between two black bars half the
+    // width of the page, which looked like a broken image.
+    const image = doc.openImage(photoBuffer);
+    const scale = Math.min(boxWidth / image.width, PHOTO_MAX_HEIGHT / image.height);
+    drawWidth = image.width * scale;
+    drawHeight = image.height * scale;
+  } catch {
+    // Unreadable header — fall through and let doc.image report properly.
+  }
+
+  const x = MARGIN + (boxWidth - drawWidth) / 2;
+  const y = doc.y;
+
+  try {
+    doc.save()
+      .roundedRect(x, y, drawWidth, drawHeight, 6)
+      .clip()
+      .image(photoBuffer, x, y, { width: drawWidth, height: drawHeight })
+      .restore();
+    doc.save().roundedRect(x, y, drawWidth, drawHeight, 6)
+      .lineWidth(0.5).strokeColor(RULE).stroke().restore();
+
+    doc.y = y + drawHeight + 5;
     doc
       .font('Helvetica-Oblique')
       .fontSize(8.5)
@@ -569,7 +686,18 @@ function drawPhoto(doc, photoBuffer) {
     doc.moveDown(0.4);
     doc.x = MARGIN;
   } catch (err) {
-    // An unsupported format (HEIC, WebP) must not cost us the whole report.
+    // HEIC, WebP and anything else pdfkit cannot decode. Say so rather than
+    // leaving a gap: a ward that knows a photo exists can ask the crew for it,
+    // and silence looked like no photo was ever taken.
+    doc.save()
+      .roundedRect(MARGIN, y, boxWidth, 34, 6)
+      .fillAndStroke(TABLE_FILL, RULE)
+      .restore();
+    doc.font('Helvetica-Oblique').fontSize(9).fillColor(TEXT_SOFT)
+      .text('A photo was sent but could not be displayed here — ask the crew to show it.',
+        MARGIN + 10, y + 12, { width: boxWidth - 20 });
+    doc.y = y + 40;
+    doc.x = MARGIN;
     logger.warn?.(`Report photo could not be embedded: ${err.message}`);
   }
 }
@@ -623,34 +751,49 @@ export async function buildReportPDFBuffer(
   registerFonts(doc);
   drawHeaderBand(doc, caseData, reportData, color);
 
-  // 1. THE FACTS — who, where, when, and who is bringing them.
-  sectionHeading(doc, 'Case details');
-  // Trimmed to what the receiving ward acts on. Reached on, Reported by,
-  // Channel, SOS at and Coordinates were dropped by request: the crew already
-  // has the phone and the pin, and the ward reads the address.
-  drawTable(doc, [
-    ['Patient', caseData.patient_name || caseData.reporter_name || 'Not given'],
-    ['Age', medicalProfile?.age ? `${medicalProfile.age} years` : 'Not on file'],
-    ['Gender', titleCase(medicalProfile?.gender) || 'Not on file'],
-    ['Blood group', medicalProfile?.blood_group || 'Not on file'],
-    ['Report at', formatDateTime()],
-    ['Ambulance', caseData.driver_name
-      ? `${caseData.driver_name}${caseData.vehicle_number ? ` (${caseData.vehicle_number})` : ''}`
-      : 'Not yet assigned'],
-    ['Pickup', caseData.patient_address || 'Address not available', { span: true }],
-    ['Destination', caseData.hospital_name || 'Not yet chosen', { span: true }],
-  ]);
+  // The order is the order a receiving ward reads in: how bad and how long,
+  // what to have ready, who is coming, then the clinical detail. It used to
+  // open with a table of administrative facts and bury the ask two thirds of
+  // the way down.
 
-  // 2. THE PHOTO — the only part of this report no model wrote.
+  // 1. HOW BAD, AND WHEN.
+  drawUrgencyBand(doc, reportData, caseData, color);
+
+  // 2. THE ASK — the reason this is sent ahead of the ambulance.
+  const resources = Array.isArray(reportData.resources_needed)
+    ? reportData.resources_needed.filter(Boolean)
+    : [];
+  drawPrepareBlock(doc, resources, reportData.hospital_preparation);
+
+  // 3. WHO. One line, blanks omitted.
+  sectionHeading(doc, 'Patient');
+  drawFactLine(doc, [
+    { label: 'Name', value: caseData.patient_name || caseData.reporter_name },
+    { label: 'Age', value: medicalProfile?.age ? `${medicalProfile.age}` : null },
+    { label: 'Sex', value: titleCase(medicalProfile?.gender) || null },
+    { label: 'Blood', value: medicalProfile?.blood_group || null },
+  ]);
+  const history = [
+    listOrDash(medicalProfile?.chronic_conditions, '') && `Conditions: ${listOrDash(medicalProfile.chronic_conditions, '')}`,
+    listOrDash(medicalProfile?.allergies, '') && `Allergies: ${listOrDash(medicalProfile.allergies, '')}`,
+    (Array.isArray(reportData.medications_mentioned) && reportData.medications_mentioned.filter(Boolean).length)
+      ? `Medicines: ${reportData.medications_mentioned.filter(Boolean).join(', ')}` : '',
+  ].filter(Boolean).join('    ·    ');
+  if (history) {
+    doc.font('Helvetica').fontSize(9).fillColor(TEXT_SOFT)
+      .text(toEncodableText(history), MARGIN, doc.y, { width: contentWidth(doc), height: 24, ellipsis: true });
+  } else {
+    doc.font('Helvetica-Oblique').fontSize(9).fillColor(TEXT_GRAY)
+      .text('No medical history on file.', MARGIN, doc.y);
+  }
+  divider(doc);
+
+  // 4. THE SCENE — the photo, then the caller's own words under it.
   if (photoBuffer) {
     sectionHeading(doc, 'Photo from the scene');
     drawPhoto(doc, photoBuffer);
   }
 
-  // 3. WHAT HAPPENED — in the caller's own words, in the script they used.
-  //    The old appendix repeated this same text on a page of its own, because
-  //    this section could only render "?". With a font it can, so the
-  //    duplicate page is gone.
   sectionHeading(doc, 'What the caller described');
   const spoken = String(reportData.transcribed_text || reportData.input_text || '').trim();
   if (spoken) {
@@ -662,12 +805,12 @@ export async function buildReportPDFBuffer(
     }, 10);
   } else {
     doc.font('Helvetica-Oblique').fontSize(9.5).fillColor(TEXT_GRAY)
-      .text('Nothing was said or typed — this report is based on the photo alone.', MARGIN, doc.y);
+      .text('Nothing was said or typed.', MARGIN, doc.y);
   }
   doc.x = MARGIN;
   divider(doc);
 
-  // 4. THE ASSESSMENT — consciousness and observations in one ruled table.
+  // 5. THE ASSESSMENT.
   sectionHeading(doc, 'Symptoms and observations');
   const observations = (Array.isArray(reportData.key_observations)
     ? reportData.key_observations : [])
@@ -688,34 +831,14 @@ export async function buildReportPDFBuffer(
   doc.font('Helvetica').fontSize(9.5).fillColor(TEXT_DARK)
     .text(
       toEncodableText(conditions.length ? conditions.join('   ·   ') : 'No conditions suggested.'),
-      MARGIN, doc.y, { width: contentWidth(doc), height: CLINICAL_TEXT_HEIGHT, ellipsis: true },
+      MARGIN, doc.y, { width: contentWidth(doc), height: 24, ellipsis: true },
     );
   doc.moveDown(0.2);
   doc.font('Helvetica-Oblique').fontSize(8).fillColor(TEXT_GRAY)
-    .text('AI assessment from the caller\'s description — clinical judgment required.', MARGIN, doc.y);
+    .text("AI assessment from the caller's description — clinical judgment required.", MARGIN, doc.y);
   divider(doc);
 
-  // 5. THE ASK — what this hospital should have waiting. The whole point of
-  //    sending the report ahead of the ambulance.
-  const resources = Array.isArray(reportData.resources_needed)
-    ? reportData.resources_needed.filter(Boolean)
-    : [];
-  sectionHeading(doc, 'Have ready on arrival');
-  if (resources.length) {
-    drawResourceLine(doc, resources);
-  } else {
-    doc.font('Helvetica-Oblique').fontSize(9.5).fillColor(TEXT_GRAY)
-      .text('No specific resources identified.', MARGIN, doc.y);
-    doc.moveDown(0.3);
-  }
-  doc.font('Helvetica').fontSize(9.5).fillColor(TEXT_DARK)
-    .text(
-      toEncodableText(reportData.hospital_preparation || 'No further preparation notes.'),
-      MARGIN, doc.y, { width: contentWidth(doc), height: CLINICAL_TEXT_HEIGHT, ellipsis: true },
-    );
-  divider(doc);
-
-  // 6. FIRST AID — what was done, or should be, before arrival.
+  // 6. FIRST AID.
   sectionHeading(doc, 'First aid given or advised');
   doc.font('Helvetica').fontSize(9.5).fillColor(TEXT_DARK)
     .text(
@@ -724,17 +847,22 @@ export async function buildReportPDFBuffer(
     );
   divider(doc);
 
-  // 7. HISTORY — what we already knew about this patient.
-  sectionHeading(doc, 'Known medical history');
-  const meds = Array.isArray(reportData.medications_mentioned)
-    ? reportData.medications_mentioned.filter(Boolean)
-    : [];
-  drawTable(doc, [
-    ['Conditions', listOrDash(medicalProfile?.chronic_conditions)],
-    ['Allergies', listOrDash(medicalProfile?.allergies)],
-    ['Medicines', listOrDash(meds, 'None mentioned')],
-    ['Profile', medicalProfile ? 'From the patient\'s account' : 'No account on file'],
+  // 7. LOGISTICS — small, last, out of the way of the clinical reading.
+  sectionHeading(doc, 'Transport');
+  drawFactLine(doc, [
+    {
+      label: 'Ambulance',
+      value: caseData.driver_name
+        ? `${caseData.driver_name}${caseData.vehicle_number ? ` (${caseData.vehicle_number})` : ''}`
+        : 'Not yet assigned',
+    },
+    { label: 'To', value: caseData.hospital_name || 'Not yet chosen' },
   ]);
+  if (caseData.patient_address) {
+    doc.font('Helvetica').fontSize(9).fillColor(TEXT_SOFT)
+      .text(`Pickup: ${toEncodableText(caseData.patient_address)}`, MARGIN, doc.y,
+        { width: contentWidth(doc), height: 22, ellipsis: true });
+  }
 
   drawFooters(doc);
   doc.end();

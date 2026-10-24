@@ -7,10 +7,28 @@ import { EVENTS, ROOMS } from '../../socket/socket.events.js';
 import logger from '../../middleware/logger.js';
 
 import whisperService from './whisper.service.js';
+import mapsService from '../maps.service.js';
 import gptService from './gpt.service.js';
 import { normaliseLanguage } from './normalise.js';
 import pdfService from '../pdf.service.js';
 import * as fileUtils from '../../utils/file.utils.js';
+
+// Minutes from where the ambulance is to where it is going. Null unless both
+// ends are known.
+const ROAD_FACTOR = 1.3;          // streets are not straight lines
+const CITY_SPEED_KMH = 30;        // an ambulance through Hyderabad traffic
+
+function estimateEtaMinutes(driverRow, hospitalRow) {
+  const dLat = Number(driverRow?.current_lat);
+  const dLng = Number(driverRow?.current_lng);
+  const hLat = Number(hospitalRow?.lat);
+  const hLng = Number(hospitalRow?.lng);
+  if (![dLat, dLng, hLat, hLng].every(Number.isFinite)) return null;
+
+  const metres = mapsService.haversineDistance(dLat, dLng, hLat, hLng) * ROAD_FACTOR;
+  const minutes = Math.round((metres / 1000 / CITY_SPEED_KMH) * 60);
+  return Math.max(minutes, 1);
+}
 
 export async function processAIReport(caseId, patientId, inputs) {
   const {
@@ -226,12 +244,16 @@ export async function processAIReport(caseId, patientId, inputs) {
     // for first, and the only ones the report was missing.
     const [{ data: hospitalRow }, { data: driverRow }] = await Promise.all([
       caseRow?.hospital_id
-        ? supabaseAdmin.from('hospitals').select('name').eq('id', caseRow.hospital_id).maybeSingle()
+        ? supabaseAdmin
+            .from('hospitals')
+            .select('name, lat, lng')
+            .eq('id', caseRow.hospital_id)
+            .maybeSingle()
         : Promise.resolve({ data: null }),
       caseRow?.driver_id
         ? supabaseAdmin
             .from('drivers')
-            .select('vehicle_number, users(full_name)')
+            .select('vehicle_number, current_lat, current_lng, users(full_name)')
             .eq('id', caseRow.driver_id)
             .maybeSingle()
         : Promise.resolve({ data: null }),
@@ -259,6 +281,16 @@ export async function processAIReport(caseId, patientId, inputs) {
         hospital_name: hospitalRow?.name,
         driver_name: driverRow?.users?.full_name,
         vehicle_number: driverRow?.vehicle_number,
+        // How long until they walk through the door — the one thing a ward
+        // needs to act on a report that arrives ahead of the patient, and the
+        // one thing it did not carry.
+        //
+        // Estimated here rather than asked of the routing API: this runs in
+        // the middle of report generation, which is already slow, and a minute
+        // either way does not change what the ward does. Straight line with a
+        // road factor, at the sort of speed an ambulance makes across
+        // Hyderabad.
+        eta_minutes: estimateEtaMinutes(driverRow, hospitalRow),
       };
       pdfResult = await pdfService.generateReportPDF(
         {
