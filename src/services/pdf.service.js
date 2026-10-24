@@ -154,18 +154,87 @@ function toEncodableText(value) {
  * Arabic-script text gets the embedded font and right alignment, which is what
  * makes the line read right-to-left. Everything else is unchanged.
  */
+/**
+ * Lay an Arabic-script paragraph out right-to-left.
+ *
+ * fontkit shapes each word correctly — the letters join and take their
+ * initial, medial and final forms — but pdfkit then places the words across
+ * the line left to right, so the sentence came out back to front: the last
+ * word sat where the first one should be. align:'right' only moved the block
+ * to the right margin; it did not reverse it. Measured rather than eyeballed:
+ * the rightmost word on the line was the end of the sentence.
+ *
+ * So the wrapping is done here, in logical order, and each finished line is
+ * reversed before it is drawn. pdfkit then lays the reversed line out left to
+ * right, which puts the first word at the right margin — where an Urdu reader
+ * starts.
+ *
+ * @returns {number} the height used, so the caller can advance past it.
+ */
+function drawRtlParagraph(doc, text, x, y, { width, maxHeight, size, color, lineGap = 1.5 }) {
+  doc.font(URDU_FONT).fontSize(size).fillColor(color);
+
+  const lineHeight = doc.currentLineHeight() + lineGap;
+  const words = String(text).trim().split(/\s+/).filter(Boolean);
+
+  const lines = [];
+  let current = [];
+  for (const word of words) {
+    const candidate = [...current, word].join(' ');
+    if (current.length && doc.widthOfString(candidate) > width) {
+      lines.push(current);
+      current = [word];
+    } else {
+      current.push(word);
+    }
+  }
+  if (current.length) lines.push(current);
+
+  const maxLines = maxHeight ? Math.max(Math.floor(maxHeight / lineHeight), 1) : lines.length;
+  const shown = lines.slice(0, maxLines);
+  const truncated = lines.length > shown.length;
+
+  shown.forEach((line, index) => {
+    // The ellipsis belongs at the end of the sentence, which in a
+    // right-to-left line is the left edge — so it goes first once reversed.
+    const words = line.slice().reverse();
+    if (truncated && index === shown.length - 1) words.unshift('…');
+    doc.text(words.join(' '), x, y + index * lineHeight, {
+      width,
+      align: 'right',
+      lineBreak: false,
+    });
+  });
+
+  return shown.length * lineHeight;
+}
+
+/**
+ * Text in whichever script it happens to be written in.
+ *
+ * Leaves doc.y just below what it drew, in both branches — pdfkit does that
+ * for itself on the Latin path, and drawRtlParagraph places lines absolutely,
+ * so it has to be done by hand there.
+ */
 function scriptText(doc, value, x, y, options = {}, size = 10.5, color = TEXT_DARK) {
   const raw = String(value ?? '');
-  const arabic = isArabicScript(raw) && urduFontPath;
-  doc
-    .font(arabic ? URDU_FONT : 'Helvetica')
-    .fontSize(arabic ? size + 0.5 : size)
-    .fillColor(color)
-    .text(arabic ? raw.normalize('NFC') : toEncodableText(raw), x, y, {
-      ...options,
-      align: arabic ? 'right' : (options.align || 'left'),
+
+  if (isArabicScript(raw) && urduFontPath) {
+    const used = drawRtlParagraph(doc, raw.normalize('NFC'), x, y, {
+      width: options.width,
+      maxHeight: options.height,
+      size: size + 0.5,
+      color,
     });
-  return arabic;
+    doc.y = y + used;
+    return;
+  }
+
+  doc
+    .font('Helvetica')
+    .fontSize(size)
+    .fillColor(color)
+    .text(toEncodableText(raw), x, y, { ...options, align: options.align || 'left' });
 }
 
 function formatDateTime(value) {
