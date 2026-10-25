@@ -20,6 +20,9 @@ CRITICAL RULES:
 7. Respect patient privacy — use initials or "the patient" in descriptions
 8. resources_needed must use ONLY terms from the provided standard list —
    never invent equipment names
+9. Answers supplied by the describing party are observations from the scene.
+   Treat them as more reliable than anything you infer from the description, and
+   never contradict one.
 
 URGENCY CLASSIFICATION GUIDE:
 - Critical: unconscious, not breathing, cardiac arrest, major trauma, stroke signs,
@@ -52,7 +55,10 @@ export function buildUserPrompt(inputs) {
     imageDescriptions = [],
     medicalProfile = null,
     detectedLanguage = 'en',
+    clarifications = [],
   } = inputs || {};
+
+  const clarificationBlock = buildClarificationBlock(clarifications);
 
   const voiceBlock = transcribedText
     ? `VOICE NOTE TRANSCRIPTION (${detectedLanguage.toUpperCase()}):\n"${transcribedText}"`
@@ -92,6 +98,8 @@ ${imageBlock}
 
 ${profileBlock}
 
+${clarificationBlock}
+
 === REQUIRED OUTPUT FORMAT ===
 
 Respond with ONLY this JSON object (no other text):
@@ -116,7 +124,155 @@ Respond with ONLY this JSON object (no other text):
   "allergies_active": ["string", ...],
   "estimated_patient_age": "string or null",
   "confidence_score": number
+  // 0.0 to 1.0 — how well the input supports the report above.
 }`;
+}
+
+/// The clarification block, appended to the report prompt once answers exist.
+///
+/// Answers are presented as confirmed scene observations rather than as more
+/// text to interpret, because that is what they are: a human looking at the
+/// patient chose one of a small set of options. A model that treats them as
+/// another opinion will average them against its own guess from the
+/// description, which is the opposite of why they were asked.
+export function buildClarificationBlock(clarifications) {
+  const answered = (clarifications || []).filter((c) => c?.answer);
+  if (answered.length === 0) {
+    return `ANSWERS FROM THE SCENE: none — the describing party skipped the questions.
+Write the report from the description alone, and leave anything it does not state
+as "Not reported". Do not compensate for the missing answers by guessing.`;
+  }
+
+  const lines = answered
+    .map((c) => `- ${c.question}\n  ANSWER: ${c.answer}`)
+    .join('\n');
+
+  const skipped = (clarifications || []).filter((c) => !c?.answer).length;
+
+  return `ANSWERS FROM THE SCENE (confirmed observations — these outrank your own
+inference from the description above, and must be reflected in the report):
+
+${lines}
+${skipped > 0 ? `\n${skipped} further question(s) were left unanswered. Leave those fields as "Not reported".` : ''}`;
+}
+
+/// Phase one: the questions, and nothing else.
+///
+/// Deliberately not a report. Under the blocking sequence the record is written
+/// once, after the answers are in, so asking the model for a provisional report
+/// here would produce a draft nobody is allowed to act on and invite someone to
+/// ship it by mistake.
+export function buildClarificationPrompt(inputs) {
+  const {
+    transcribedText = null,
+    userText = null,
+    imageDescriptions = [],
+    medicalProfile = null,
+    detectedLanguage = 'en',
+  } = inputs || {};
+
+  const voiceBlock = transcribedText
+    ? `VOICE NOTE TRANSCRIPTION (${detectedLanguage.toUpperCase()}):\n"${transcribedText}"`
+    : 'VOICE NOTE: Not provided';
+
+  const textBlock = userText ? `TEXT INPUT:\n"${userText}"` : 'TEXT INPUT: Not provided';
+
+  const imageBlock =
+    imageDescriptions.length > 0
+      ? `IMAGE ANALYSIS:\n${imageDescriptions.map((d, i) => `Image ${i + 1}: ${d}`).join('\n')}`
+      : 'IMAGES: Not provided';
+
+  const profileBlock = medicalProfile
+    ? `ON FILE ALREADY (do not ask about any of these):
+- Blood Group: ${medicalProfile.blood_group || 'not on file'}
+- Age: ${calculateAge(medicalProfile.date_of_birth) ?? 'not on file'}
+- Known Conditions: ${medicalProfile.chronic_conditions?.join(', ') || 'none on file'}
+- Current Medications: ${medicalProfile.current_medications?.join(', ') || 'none on file'}
+- Known Allergies: ${medicalProfile.allergies?.join(', ') || 'none on file'}`
+    : 'ON FILE ALREADY: nothing — this patient is unregistered.';
+
+  return `CLARIFICATION QUESTION REQUEST
+
+Someone is standing over a casualty and has just described what they can see.
+A doctor at the receiving hospital will act on the report built from it. Before
+that report is written, you get to ask between two and four questions.
+
+=== WHAT THEY TOLD US ===
+
+${voiceBlock}
+
+${textBlock}
+
+${imageBlock}
+
+${profileBlock}
+
+=== WHAT TO ASK ===
+
+Ask about what this description does NOT settle, in the order that would most
+change what the hospital prepares. Airway, breathing, consciousness and bleeding
+come before history. Rules, all of them binding:
+
+- Between 2 and 4 questions. Fewer is better than padding with filler.
+- Each has 2 to 4 options. At most 4 words per option. Mutually exclusive.
+- The person answers with ONE TAP and cannot type. Never ask for a number, a
+  name, a time, a dose or anything open-ended.
+- Phrase for a frightened bystander with no medical training. "Is their chest
+  moving?" not "Assess respiratory effort".
+- Ask NOTHING the description, the images or the file above already answers.
+- Include an option that means "I cannot tell" wherever a bystander genuinely
+  might not be able to tell. Forcing a guess is worse than knowing nothing.
+
+=== LANGUAGE ===
+
+The report is written in English, so the English question and options below go
+into the record and are read by hospital staff.
+
+${languageInstruction(detectedLanguage)}
+
+=== REQUIRED OUTPUT FORMAT ===
+
+Respond with ONLY this JSON object (no other text):
+
+{
+  "clarification_questions": [
+    {
+      "field": "one of: consciousness_state | urgency_level | emergency_type | key_observations | medications_mentioned | allergies_active",
+      "question": "string — in English",
+      "options": ["string", "string", ...],
+      "question_local": "string — the same question, for the person to read",
+      "options_local": ["string", "string", ...]
+    }
+  ]
+}
+
+options_local must have exactly the same number of entries as options, in the
+same order, because the person answers by position.`;
+}
+
+/// What to do about the language the questions are shown in.
+///
+/// The record stays in English for hospital record-keeping, but the questions
+/// are read by whoever is standing over the patient. Asking an Urdu speaker
+/// "Is their chest moving?" in English wastes the question and is the opposite
+/// of what a multilingual intake channel is for.
+function languageInstruction(language) {
+  switch (language) {
+    case 'ur':
+      return `The person describing the patient is writing Urdu. Give question_local and
+options_local in Urdu script. Keep them short — these are tap targets, not prose.`;
+    case 'roman_ur':
+      return `The person describing the patient is writing Roman Urdu — Urdu in Latin
+script, as it is actually typed on a phone in Pakistan ("mareez hosh mein hai?").
+Give question_local and options_local in that form, not in Urdu script and not in
+formal English.`;
+    case 'sd':
+      return `The person describing the patient is speaking Sindhi. Give question_local and
+options_local in Urdu script, which they will be able to read.`;
+    default:
+      return `The person describing the patient is writing English. Repeat the English
+question and options in question_local and options_local unchanged.`;
+  }
 }
 
 // Prompt for GPT-4o vision analysis of a single injury/scene image.
@@ -131,4 +287,11 @@ Be clinical and factual. Maximum 3 sentences.
 If the image shows no relevant medical content, say: 'No medically relevant content visible.'`;
 }
 
-export default { SYSTEM_PROMPT, buildUserPrompt, calculateAge, buildImageAnalysisPrompt };
+export default {
+  SYSTEM_PROMPT,
+  buildUserPrompt,
+  buildClarificationPrompt,
+  buildClarificationBlock,
+  calculateAge,
+  buildImageAnalysisPrompt,
+};

@@ -15,6 +15,56 @@ export const TRIGGERS = {
 
 export const CANCEL_WORDS = ['cancel', 'stop', 'منسوخ', 'band karo', 'cancel karo'];
 
+/// Closes the clarification sequence and sends the report as it stands.
+///
+/// Kept apart from CANCEL_WORDS, and deliberately so: cancelling calls off the
+/// ambulance, skipping only stops the questions. Someone who means "enough
+/// questions" must not be able to cancel their emergency by saying it the wrong
+/// way, so none of these words overlap.
+export const SKIP_WORDS = [
+  '0',
+  'skip',
+  'send',
+  'send it',
+  'bas',
+  'bas karo',
+  'chhoro',
+  'chhodo',
+  'nahi pata',
+  'pata nahi',
+  'بس',
+  'چھوڑیں',
+  'نہیں معلوم',
+  'معلوم نہیں',
+];
+
+export function isSkip(text) {
+  const t = String(text || '').trim().toLowerCase();
+  return SKIP_WORDS.some((w) => t === w);
+}
+
+/// The number someone replied with, or null.
+///
+/// Tolerant of what people actually type: "2", "2.", "option 2", "٢" in Urdu
+/// digits. Not tolerant of "2 and 3" — a clarification answer is one choice,
+/// and guessing which of two they meant is worse than asking again.
+export function parseChoice(text, optionCount) {
+  const raw = String(text || '').trim();
+  if (!raw) return null;
+
+  // Urdu-Indic digits to ASCII, so a reply typed on an Urdu keyboard works.
+  const ascii = raw.replace(/[٠-٩۰-۹]/g, (d) =>
+    String(d.charCodeAt(0) & 0x0f),
+  );
+
+  const digits = ascii.match(/\d+/g);
+  if (!digits || digits.length !== 1) return null;
+
+  const n = Number(digits[0]);
+  if (!Number.isInteger(n) || n < 1 || n > optionCount) return null;
+  return n;
+}
+
 /** Which language a trigger word implies, or null if it is not a trigger. */
 export function detectTrigger(text) {
   const t = String(text || '').trim().toLowerCase();
@@ -65,7 +115,18 @@ const copy = {
     unknown: 'Send *SOS* to request an ambulance.',
     voicePrompt:
       'You can send a voice note describing the situation — what happened, is the patient conscious, any bleeding. The hospital will receive it before the ambulance arrives.',
-    reportReceived: 'Received. Preparing the patient report — this takes about a minute.',
+    reportReceived: 'Received. Reading what you sent — one moment.',
+    clarifyIntro:
+      'A few quick questions before the hospital gets the report. Reply with a number.\n\nSend *0* at any time to send the report without answering the rest.',
+    clarifyQuestion: ({ index, total, question, options }) =>
+      `*Question ${index} of ${total}*\n\n${question}\n\n`
+      + `${options.map((o, i) => `*${i + 1}.* ${o}`).join('\n')}\n\n`
+      + `_Reply with a number, or 0 to send the report now._`,
+    clarifyBadReply: (count) =>
+      `Please reply with a number from *1* to *${count}*, or *0* to send the report now.`,
+    clarifyWriting: 'Thank you. Writing the report and sending it to the hospital now.',
+    clarifyTimedOut:
+      'No reply, so the report has been sent to the hospital with what you had already told us.',
     reportReady: (r) =>
       `📋 Patient report ready\n\nUrgency: *${r.urgency || 'not assessed'}*\n${r.type || ''}\n\n${r.firstAid ? `While you wait: ${r.firstAid}\n\n` : ''}The hospital has received this.`,
     reportFailed:
@@ -102,7 +163,18 @@ const copy = {
     unknown: 'ایمبولینس کے لیے *SOS* بھیجیں۔',
     voicePrompt:
       'صورتحال بتانے کے لیے وائس نوٹ بھیجیں — کیا ہوا، مریض ہوش میں ہے یا نہیں، خون تو نہیں بہہ رہا۔ ہسپتال کو ایمبولینس سے پہلے اطلاع مل جائے گی۔',
-    reportReceived: 'موصول ہو گیا۔ مریض کی رپورٹ تیار کی جا رہی ہے — تقریباً ایک منٹ۔',
+    reportReceived: 'موصول ہو گیا۔ آپ کی بھیجی ہوئی تفصیل پڑھی جا رہی ہے — ایک لمحہ۔',
+    clarifyIntro:
+      'ہسپتال کو رپورٹ بھیجنے سے پہلے چند مختصر سوال۔ نمبر لکھ کر جواب دیں۔\n\nباقی سوالوں کے بغیر رپورٹ بھیجنے کے لیے کسی بھی وقت *0* بھیجیں۔',
+    clarifyQuestion: ({ index, total, question, options }) =>
+      `*سوال ${index} / ${total}*\n\n${question}\n\n`
+      + `${options.map((o, i) => `*${i + 1}.* ${o}`).join('\n')}\n\n`
+      + `_نمبر لکھ کر جواب دیں، یا ابھی رپورٹ بھیجنے کے لیے 0 لکھیں۔_`,
+    clarifyBadReply: (count) =>
+      `براہ کرم *1* سے *${count}* تک کوئی نمبر لکھیں، یا رپورٹ ابھی بھیجنے کے لیے *0*۔`,
+    clarifyWriting: 'شکریہ۔ رپورٹ تیار کر کے ہسپتال کو بھیجی جا رہی ہے۔',
+    clarifyTimedOut:
+      'جواب موصول نہیں ہوا، اس لیے جو تفصیل آپ نے پہلے بتائی تھی اسی پر رپورٹ ہسپتال کو بھیج دی گئی ہے۔',
     reportReady: (r) =>
       `📋 مریض کی رپورٹ تیار ہے\n\nنوعیت: *${r.urgency || 'نامعلوم'}*\n${r.type || ''}\n\n${r.firstAid ? `انتظار کے دوران: ${r.firstAid}\n\n` : ''}ہسپتال کو رپورٹ مل گئی ہے۔`,
     reportFailed:
@@ -139,7 +211,18 @@ const copy = {
     unknown: 'Ambulance ke liye *SOS* bhejein.',
     voicePrompt:
       'Situation batane ke liye voice note bhejein — kya hua, mareez hosh mein hai ya nahi, khoon to nahi beh raha. Hospital ko ambulance se pehle ittila mil jayegi.',
-    reportReceived: 'Mil gaya. Mareez ki report tayyar ki ja rahi hai — taqreeban ek minute.',
+    reportReceived: 'Mil gaya. Aap ne jo bheja hai woh parha ja raha hai — ek lamha.',
+    clarifyIntro:
+      'Hospital ko report bhejne se pehle chand chhote sawal. Number likh kar jawab dein.\n\nBaqi sawalon ke baghair report bhejne ke liye kisi bhi waqt *0* bhejein.',
+    clarifyQuestion: ({ index, total, question, options }) =>
+      `*Sawal ${index} / ${total}*\n\n${question}\n\n`
+      + `${options.map((o, i) => `*${i + 1}.* ${o}`).join('\n')}\n\n`
+      + `_Number likh kar jawab dein, ya abhi report bhejne ke liye 0 likhein._`,
+    clarifyBadReply: (count) =>
+      `Baraye meharbani *1* se *${count}* tak koi number likhein, ya report abhi bhejne ke liye *0*.`,
+    clarifyWriting: 'Shukriya. Report tayyar kar ke hospital ko bheji ja rahi hai.',
+    clarifyTimedOut:
+      'Jawab nahi mila, is liye jo aap ne pehle bataya tha usi par report hospital ko bhej di gayi hai.',
     reportReady: (r) =>
       `📋 Mareez ki report tayyar hai\n\nUrgency: *${r.urgency || 'maloom nahi'}*\n${r.type || ''}\n\n${r.firstAid ? `Intezar ke doran: ${r.firstAid}\n\n` : ''}Hospital ko report mil gayi hai.`,
     reportFailed:
@@ -152,4 +235,13 @@ export function t(language = 'en') {
   return copy[language] || copy.en;
 }
 
-export default { TRIGGERS, CANCEL_WORDS, detectTrigger, isCancel, t };
+export default {
+  TRIGGERS,
+  CANCEL_WORDS,
+  SKIP_WORDS,
+  detectTrigger,
+  isCancel,
+  isSkip,
+  parseChoice,
+  t,
+};

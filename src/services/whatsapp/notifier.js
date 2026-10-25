@@ -76,6 +76,51 @@ export async function notifyHospital(caseId, hospitalName) {
   await client.sendText(target.phone, t(target.language).hospital(hospitalName));
 }
 
+/**
+ * The finished clinical report, delivered into the chat.
+ *
+ * One function for every route that produces one — the questions being
+ * answered, the questions being skipped, or the sequence timing out server-side
+ * — so the user gets the same message and the same document whichever way their
+ * report came to be written. `preamble` is the line that explains why it is
+ * arriving now, and is the only part that differs.
+ *
+ * Also returns the conversation to the assigned state: the questions are over,
+ * and a number typed after this is not an answer to anything.
+ */
+export async function notifyReportReady(caseId, report, { preamble = null } = {}) {
+  const target = await whatsappTarget(caseId);
+  if (!target || !report) return;
+
+  const copy = t(target.language);
+  await saveSession(target.phone, { state: STATES.ASSIGNED, case_id: caseId });
+
+  if (preamble) await client.sendText(target.phone, preamble(copy));
+
+  await client.sendText(
+    target.phone,
+    copy.reportReady({
+      urgency: report.urgencyLevel,
+      type: report.emergencyType,
+      firstAid: report.firstAidSuggestion,
+    }),
+  );
+
+  if (report.pdfUrl) {
+    const { data: row } = await supabaseAdmin
+      .from('emergency_cases')
+      .select('case_number')
+      .eq('id', caseId)
+      .maybeSingle();
+    await client.sendDocument(
+      target.phone,
+      report.pdfUrl,
+      `${row?.case_number || 'ResQPK'}-report.pdf`,
+      'Patient report — also sent to the hospital',
+    );
+  }
+}
+
 /** Ride milestones, in the words a worried person actually needs. */
 export async function notifyStatus(caseId, status, hospitalName = null) {
   const target = await whatsappTarget(caseId);
@@ -100,4 +145,11 @@ export function safely(promise, context) {
   );
 }
 
-export default { notifyDriverAssigned, notifyNoDriver, notifyHospital, notifyStatus, safely };
+export default {
+  notifyDriverAssigned,
+  notifyNoDriver,
+  notifyHospital,
+  notifyStatus,
+  notifyReportReady,
+  safely,
+};

@@ -8,6 +8,7 @@ import logger from './src/middleware/logger.js';
 import { initializeSocketServer } from './src/socket/socket.server.js';
 import { sendWeeklyEngagementNotifications } from './src/services/notification.service.js';
 import { reapStaleCases } from './src/services/stale-case.service.js';
+import { reapAbandonedClarifications } from './src/services/ai/clarification-timeout.service.js';
 
 // Build the HTTP server from the Express app so Socket.io can share the port.
 const httpServer = http.createServer(app);
@@ -55,6 +56,26 @@ const sweepStaleCases = async () => {
 cron.schedule('*/10 * * * *', sweepStaleCases);
 logger.info('Stale case sweep scheduled (every 10 minutes).');
 sweepStaleCases();
+
+// The clinical record is held back until the clarification questions are
+// answered, so a phone that dies mid-sequence would leave the hospital with
+// nothing. This is the deadline on that: every 30 seconds, because the whole
+// point is that a ward finds out inside the ambulance's journey, not after it.
+// Runs at boot too — a restart is exactly when a sequence gets stranded.
+const sweepAbandonedClarifications = async () => {
+  try {
+    const { generated, failed } = await reapAbandonedClarifications();
+    if (generated > 0 || failed > 0) {
+      logger.info(`Clarification sweep: generated ${generated}, failed ${failed}.`);
+    }
+  } catch (error) {
+    logger.error(`Clarification sweep failed: ${error.message}`);
+  }
+};
+
+cron.schedule('*/30 * * * * *', sweepAbandonedClarifications);
+logger.info('Clarification timeout sweep scheduled (every 30 seconds).');
+sweepAbandonedClarifications();
 
 // Crash cleanly on programming errors rather than running in a bad state.
 process.on('uncaughtException', (err) => {

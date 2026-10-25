@@ -8,10 +8,12 @@ import caseService from '../case.service.js';
 import mapsService from '../maps.service.js';
 import logger from '../../middleware/logger.js';
 import aiPipeline from '../ai/ai.pipeline.js';
+import clarificationService from '../ai/clarification.service.js';
 import client from './whatsapp.client.js';
 import media from './media.js';
+import notifier from './notifier.js';
 import { STATES, getSession, saveSession, clearSession } from './session.store.js';
-import { detectTrigger, isCancel, t } from './messages.js';
+import { detectTrigger, isCancel, isSkip, parseChoice, t } from './messages.js';
 
 // A phone may raise this many requests per hour. Removing the install barrier
 // removed what quietly deterred prank calls.
@@ -168,11 +170,58 @@ async function dispatchCase(phone, session) {
   return result;
 }
 
+/** Sends the next outstanding question as a numbered list. */
+async function askClarification(phone, language, clarifications, { intro = false } = {}) {
+  const copy = t(language);
+  const open = (clarifications || []).filter((c) => !c?.answer && !c?.skipped_at);
+  if (open.length === 0) return false;
+
+  const total = (clarifications || []).length;
+  const index = total - open.length + 1;
+
+  if (intro) await client.sendText(phone, copy.clarifyIntro);
+  // Shown in the language they are writing in, falling back to the English the
+  // record carries. The option they pick is resolved by position, so what is
+  // displayed never has to be matched against what is stored.
+  await client.sendText(
+    phone,
+    copy.clarifyQuestion({
+      index,
+      total,
+      question: open[0].question_local || open[0].question,
+      options: open[0].options_local || open[0].options || [],
+    }),
+  );
+  return true;
+}
+
+/// The question a reply in AWAITING_CLARIFICATION is answering.
+///
+/// Read back from the database rather than remembered in the session, because
+/// the server-side deadline can close the sequence between the question being
+/// sent and the reply arriving. The database is the only thing that knows
+/// whether this answer is still wanted.
+async function currentQuestion(caseId) {
+  try {
+    const { clarifications } = await clarificationService.getOpenClarifications(caseId);
+    const open = (clarifications || []).filter((c) => !c?.answer && !c?.skipped_at);
+    return { all: clarifications || [], question: open[0] || null };
+  } catch (err) {
+    logger.warn(`Could not read clarifications for ${caseId}: ${err.message}`);
+    return { all: [], question: null };
+  }
+}
+
 /**
  * A voice note, photo or typed description during an active case becomes the
  * AI patient overview — the same pipeline the app uses. This is the point of
  * the whole channel: a bystander who installed nothing gives the hospital a
  * structured clinical summary before the ambulance arrives.
+ *
+ * Two phases, as in the app. This one analyses what was sent and asks the
+ * clarification questions; the answers are what generate the record. Nothing
+ * reaches the hospital until the sequence closes — by the last answer, by *0*,
+ * or by the server-side deadline.
  */
 async function submitClinicalInput(phone, session, { kind, mediaId, text }) {
   const copy = t(session.language);
@@ -205,28 +254,34 @@ async function submitClinicalInput(phone, session, { kind, mediaId, text }) {
         inputs.userText = text;
       }
 
-      const result = await aiPipeline.processAIReport(caseId, row?.patient_id || null, inputs);
-
-      await client.sendText(
-        phone,
-        copy.reportReady({
-          urgency: result.urgencyLevel,
-          type: result.emergencyType,
-          firstAid: result.firstAidSuggestion,
-        }),
+      const analysis = await aiPipeline.analyseForClarification(
+        caseId,
+        row?.patient_id || null,
+        inputs,
       );
 
-      if (result.pdfUrl) {
-        await client.sendDocument(
-          phone,
-          result.pdfUrl,
-          `${row?.case_number || 'ResQPK'}-report.pdf`,
-          'Patient report — also sent to the hospital',
+      if (analysis.awaitingClarification) {
+        await saveSession(phone, {
+          state: STATES.AWAITING_CLARIFICATION,
+          case_id: caseId,
+        });
+        await askClarification(phone, session.language, analysis.clarifications, {
+          intro: true,
+        });
+        logger.info(
+          `WhatsApp ${kind} → ${analysis.clarifications.length} question(s) for ${row?.case_number}`,
         );
+        return null;
       }
 
+      // Nothing worth asking — write it now.
+      const result = await aiPipeline.generateFinalReport(caseId, {
+        analysis: analysis.analysis,
+      });
+      await notifier.notifyReportReady(caseId, result);
       logger.info(
-        `WhatsApp ${kind} → report for ${row?.case_number} (${result.urgencyLevel}, ${result.generationTimeMs}ms)`,
+        `WhatsApp ${kind} → report for ${row?.case_number} `
+          + `(${result?.urgencyLevel}, ${result?.generationTimeMs}ms, no questions)`,
       );
       return null;
     } catch (err) {
@@ -236,6 +291,97 @@ async function submitClinicalInput(phone, session, { kind, mediaId, text }) {
   })();
 
   return null;
+}
+
+/**
+ * One numbered reply to a clarification question.
+ *
+ * A reply that is not a number gets the question again rather than being fed to
+ * the model: the sequence is a closed set of options by design, and a sentence
+ * typed here would be read as an answer it is not. Someone who wants to say
+ * more in words can send *0* and then type, which restarts the analysis with
+ * what they wrote.
+ */
+async function answerClarificationReply(phone, session, input) {
+  const copy = t(session.language);
+  const caseId = session.case_id;
+
+  // 0, "skip", "bas", "pata nahi" — send the report as it stands.
+  if (input.kind === 'text' && isSkip(input.text)) {
+    return finishClarification(phone, session, () =>
+      clarificationService.skipClarifications(caseId),
+    );
+  }
+
+  const { question } = await currentQuestion(caseId);
+  if (!question) {
+    // The deadline closed the sequence, or the report is already written. The
+    // notifier has told them; nothing here to answer.
+    await saveSession(phone, { state: STATES.ASSIGNED, case_id: caseId });
+    return client.sendText(phone, copy.voicePrompt);
+  }
+
+  const choice = parseChoice(input.text, question.options.length);
+  if (choice == null) {
+    return client.sendText(phone, copy.clarifyBadReply(question.options.length));
+  }
+
+  return finishClarification(phone, session, () =>
+    clarificationService.answerClarification(caseId, {
+      questionId: question.id,
+      answer: question.options[choice - 1],
+    }),
+  );
+}
+
+/**
+ * Runs one clarification write, then either asks the next question or delivers
+ * the report the write produced.
+ *
+ * The write is awaited inline rather than detached, unlike the analysis above:
+ * these calls are quick unless they are the one that generates the record, and
+ * that one must not race the next inbound message. The per-number queue in
+ * handleInbound is what makes that safe.
+ */
+async function finishClarification(phone, session, write) {
+  const copy = t(session.language);
+  const caseId = session.case_id;
+
+  let result;
+  try {
+    result = await write();
+  } catch (err) {
+    // A 409 means the deadline or another reply got there first, which is not
+    // the user's problem — the report either exists or is being written, and
+    // the notifier will deliver it.
+    if (err.status === 409) {
+      await saveSession(phone, { state: STATES.ASSIGNED, case_id: caseId });
+      return null;
+    }
+    logger.error(`WhatsApp clarification failed for ${caseId}: ${err.message}`);
+    return client.sendText(phone, copy.reportFailed).catch(() => {});
+  }
+
+  // Still questions outstanding — ask the next one.
+  if (!result?.report) {
+    const asked = await askClarification(phone, session.language, result?.clarifications);
+    if (asked) return null;
+  }
+
+  if (result?.report) {
+    await notifier.notifyReportReady(caseId, result.report, {
+      preamble: (c) => c.clarifyWriting,
+    });
+    logger.info(
+      `WhatsApp clarification complete for ${caseId} (${result.clarificationState})`,
+    );
+    return null;
+  }
+
+  // No report and nothing left to ask: the generation failed somewhere it had
+  // already been logged. Say so rather than leaving them waiting.
+  await saveSession(phone, { state: STATES.ASSIGNED, case_id: caseId });
+  return client.sendText(phone, copy.reportFailed).catch(() => {});
 }
 
 async function cancelFlow(phone, session) {
@@ -269,6 +415,12 @@ async function processInbound(message, contact) {
   }
 
   // A voice note or photo during an active case feeds the AI patient overview.
+  //
+  // This holds mid-sequence too: someone who sends more audio rather than
+  // answering has given the system better information than any of its questions
+  // would have extracted, so the analysis starts again on the new recording and
+  // asks whatever is still missing from it. The outstanding questions are
+  // replaced, and the case leaves 'awaiting_clarification' while that happens.
   if (input.kind === 'audio' || input.kind === 'image') {
     if (!session.case_id) return client.sendText(phone, copy.unknown);
     return submitClinicalInput(phone, session, { kind: input.kind, mediaId: input.mediaId });
@@ -338,6 +490,16 @@ async function processInbound(message, contact) {
         input.id === 'confirm_yes' || /^(1|yes|haan|ہاں|ok)$/i.test((input.text || '').trim());
       if (!confirmed) return askConfirm(phone, lang, session.context?.label);
       return dispatchCase(phone, session);
+    }
+
+    case STATES.AWAITING_CLARIFICATION: {
+      if (!session.case_id) return client.sendText(phone, copy.unknown);
+      // A location pin mid-sequence is a correction, not an answer.
+      if (input.kind === 'location') {
+        logger.info(`WhatsApp location update during clarification on ${session.case_id}`);
+        return null;
+      }
+      return answerClarificationReply(phone, session, input);
     }
 
     case STATES.DISPATCHING:

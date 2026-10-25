@@ -2,6 +2,7 @@
 import OpenAI from 'openai';
 
 import promptBuilder from './prompt.builder.js';
+import { buildClarifications } from './clarification.js';
 import { normaliseConsciousness, normaliseUrgency } from './normalise.js';
 import logger from '../../middleware/logger.js';
 
@@ -40,7 +41,44 @@ export async function analyzeImage(imageBuffer, mimeType) {
   }
 }
 
-// Generates the structured triage report (forced JSON) from all inputs.
+/// Phase one of the blocking sequence: the questions to put to the scene
+/// before any record is written.
+///
+/// Never throws. The questions are an improvement on the record, not a
+/// precondition for it — if this call fails, the sequence is simply not offered
+/// and the record is generated from the description alone. Holding an emergency
+/// up because a question could not be composed would be the worst of both
+/// designs.
+export async function generateClarificationQuestions(inputs) {
+  try {
+    const startTime = Date.now();
+    const response = await openai.chat.completions.create({
+      model: MODEL,
+      // Questions only — a fraction of a report.
+      max_tokens: 500,
+      temperature: 0.2,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: promptBuilder.SYSTEM_PROMPT },
+        { role: 'user', content: promptBuilder.buildClarificationPrompt(inputs) },
+      ],
+    });
+
+    const raw = response.choices[0]?.message?.content;
+    const parsed = JSON.parse(raw);
+    const questions = buildClarifications(parsed.clarification_questions);
+    logger.info(
+      `Composed ${questions.length} clarification question(s) in ${Date.now() - startTime}ms`,
+    );
+    return questions;
+  } catch (error) {
+    logger.error(`Clarification questions unavailable: ${error.message}`);
+    return [];
+  }
+}
+
+// Generates the structured triage report (forced JSON) from all inputs,
+// including any answers given to the clarification questions.
 export async function generateReport(inputs) {
   const userPrompt = promptBuilder.buildUserPrompt(inputs);
 
@@ -49,7 +87,7 @@ export async function generateReport(inputs) {
     const startTime = Date.now();
     response = await openai.chat.completions.create({
       model: MODEL,
-      max_tokens: 800,
+      max_tokens: 900,
       temperature: 0.1,
       response_format: { type: 'json_object' },
       messages: [
@@ -88,6 +126,10 @@ export async function generateReport(inputs) {
     reportData.resources_needed = ['Emergency Ward'];
   }
 
+  const score = Number(reportData.confidence_score);
+  reportData.confidence_score =
+    Number.isFinite(score) && score >= 0 && score <= 1 ? score : null;
+
   return {
     ...reportData,
     generationTimeMs: response._generationTimeMs,
@@ -113,4 +155,9 @@ export async function generateReportWithRetry(inputs, maxRetries = 2) {
   throw lastError;
 }
 
-export default { analyzeImage, generateReport, generateReportWithRetry };
+export default {
+  analyzeImage,
+  generateClarificationQuestions,
+  generateReport,
+  generateReportWithRetry,
+};

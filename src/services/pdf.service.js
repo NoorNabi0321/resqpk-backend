@@ -294,6 +294,71 @@ function sectionHeading(doc, label) {
 
 
 /**
+ * The clarification questions and the answers given from the scene.
+ *
+ * Drawn as question-then-answer pairs rather than a table, because the question
+ * is the context an answer is meaningless without: "Yes" on its own tells a
+ * reader nothing. Unanswered questions are printed too, greyed, so the record
+ * is honest about what was asked and not settled rather than quietly omitting
+ * it — a doctor who can see that nobody could say whether the chest was moving
+ * knows something a silent report does not tell them.
+ *
+ * Draws nothing at all when no questions were put, so reports from the
+ * WhatsApp channel and from before this feature existed are unchanged.
+ */
+function drawClarifications(doc, clarifications) {
+  const questions = (Array.isArray(clarifications) ? clarifications : []).filter(
+    (c) => c && c.question,
+  );
+  if (questions.length === 0) return;
+
+  divider(doc);
+  sectionHeading(doc, 'Answers from the scene');
+
+  const width = contentWidth(doc);
+  for (const q of questions) {
+    if (doc.y > doc.page.height - 90) doc.addPage();
+
+    doc
+      .font('Helvetica')
+      .fontSize(9)
+      .fillColor(TEXT_GRAY)
+      .text(toEncodableText(q.question), MARGIN, doc.y, {
+        width,
+        height: 24,
+        ellipsis: true,
+      });
+
+    const answered = q.answer != null && q.answer !== '';
+    doc
+      .font(answered ? 'Helvetica-Bold' : 'Helvetica-Oblique')
+      .fontSize(10)
+      .fillColor(answered ? TEXT_DARK : TEXT_GRAY)
+      .text(
+        toEncodableText(answered ? q.answer : 'Not answered'),
+        MARGIN + 12,
+        doc.y + 1,
+        { width: width - 12, height: 20, ellipsis: true },
+      );
+    doc.moveDown(0.4);
+    doc.x = MARGIN;
+  }
+
+  doc
+    .font('Helvetica-Oblique')
+    .fontSize(8)
+    .fillColor(TEXT_GRAY)
+    .text(
+      'Asked before this report was written. The answers are observations from '
+        + 'the scene and the report above reflects them.',
+      MARGIN,
+      doc.y,
+      { width },
+    );
+  doc.x = MARGIN;
+}
+
+/**
  * The facts table: two label/value pairs per row, ruled and banded.
  *
  * A table rather than prose because this is the part staff read at a glance,
@@ -808,6 +873,17 @@ export async function buildReportPDFBuffer(
       .text('Nothing was said or typed.', MARGIN, doc.y);
   }
   doc.x = MARGIN;
+
+  // 4b. WHAT WE ASKED, AND WHAT THEY SAID.
+  //
+  // These answers were given before this report was written and are part of
+  // what it was written from, so a clinician checking the source needs them
+  // next to the description — same reason the transcription is printed above.
+  // The distinction matters: the description is what someone volunteered, these
+  // are answers to specific questions, and a tap on "Not responding at all" is
+  // firmer evidence than a sentence that never mentioned consciousness.
+  drawClarifications(doc, reportData.clarifications);
+
   divider(doc);
 
   // 5. THE ASSESSMENT.

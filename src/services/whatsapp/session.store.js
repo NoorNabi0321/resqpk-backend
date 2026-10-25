@@ -21,7 +21,15 @@ export const STATES = {
   AWAITING_CONFIRM: 'awaiting_confirm',
   DISPATCHING: 'dispatching',
   ASSIGNED: 'assigned',
+  /// Questions put, report deliberately not yet written. A number arriving in
+  /// this state is an answer to a specific clarification question.
+  AWAITING_CLARIFICATION: 'awaiting_clarification',
 };
+
+/// States belonging to a case that is already running. A conversation in one of
+/// these stays reachable past the idle TTL: the ambulance is on its way, and a
+/// reply about it is not a stale "1" from yesterday.
+const LIVE_STATES = [STATES.DISPATCHING, STATES.ASSIGNED, STATES.AWAITING_CLARIFICATION];
 
 function expiryFromNow() {
   return new Date(Date.now() + SESSION_TTL_MINUTES * 60 * 1000).toISOString();
@@ -38,7 +46,7 @@ export async function getSession(phone) {
   if (!data) return { phone, state: STATES.IDLE, context: {}, language: 'en', case_id: null };
 
   const expired = data.expires_at && new Date(data.expires_at) < new Date();
-  if (expired && data.state !== STATES.ASSIGNED && data.state !== STATES.DISPATCHING) {
+  if (expired && !LIVE_STATES.includes(data.state)) {
     // An abandoned half-flow must not hold a dispatch open, but a case that is
     // already running stays reachable for status replies.
     return { phone, state: STATES.IDLE, context: {}, language: data.language || 'en', case_id: null };

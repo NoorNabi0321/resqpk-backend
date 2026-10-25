@@ -2,6 +2,9 @@
 import multer from 'multer';
 
 import aiPipeline from '../services/ai/ai.pipeline.js';
+import clarificationService, {
+  ClarificationError,
+} from '../services/ai/clarification.service.js';
 import pdfService from '../services/pdf.service.js';
 import { supabaseAdmin } from '../config/supabase.js';
 import { getIO } from '../socket/socket.server.js';
@@ -71,12 +74,35 @@ export async function generateReport(req, res) {
   }
 
   try {
-    const result = await aiPipeline.processAIReport(caseId, emergencyCase.patient_id || null, {
-      voiceNoteBuffer,
-      voiceNoteMimeType,
-      userText,
-      imageBuffers,
-      inputLanguage,
+    // Phase 1: analyse the inputs and compose the questions. Nothing is
+    // delivered to the hospital here — the record is written after the answers
+    // come in, so there is no provisional version anyone can act on.
+    const analysis = await aiPipeline.analyseForClarification(
+      caseId,
+      emergencyCase.patient_id || null,
+      { voiceNoteBuffer, voiceNoteMimeType, userText, imageBuffers, inputLanguage },
+    );
+
+    if (analysis.awaitingClarification) {
+      return successResponse(
+        res,
+        {
+          caseId,
+          generationStatus: 'awaiting_clarification',
+          clarificationState: 'awaiting',
+          clarifications: analysis.clarifications,
+          transcribedText: analysis.transcribedText,
+          detectedLanguage: analysis.detectedLanguage,
+        },
+        'A few questions before the report is written',
+        200,
+      );
+    }
+
+    // No questions worth asking — write the record straight away rather than
+    // making an emergency wait on an empty screen.
+    const result = await aiPipeline.generateFinalReport(caseId, {
+      analysis: analysis.analysis,
     });
     return successResponse(res, result, 'Emergency report generated and sent to hospital', 200);
   } catch (error) {
@@ -155,7 +181,8 @@ export async function resendReportToHospital(req, res) {
     .select(
       `id, urgency_level, emergency_type, consciousness_state, key_observations,
        first_aid_suggestion, possible_conditions, resources_needed, transcribed_text,
-       input_language, pdf_storage_path, generation_status,
+       input_language, pdf_storage_path, generation_status, clarifications,
+       clarification_state, confidence_score,
        emergency_cases!inner(patient_id, hospital_id, case_number)`,
     )
     .eq('case_id', caseId)
@@ -195,6 +222,11 @@ export async function resendReportToHospital(req, res) {
         possibleConditions: report.possible_conditions,
         transcribedText: report.transcribed_text,
         inputLanguage: report.input_language,
+        // The questions that were put before this was written go with it, so a
+        // resend lands on the desk as the same document, not a thinner one.
+        confidenceScore: report.confidence_score ?? null,
+        clarificationState: report.clarification_state ?? 'none',
+        clarifications: report.clarifications || [],
       },
       pdfUrl,
       resourcesNeeded: report.resources_needed || [],
@@ -211,10 +243,96 @@ export async function resendReportToHospital(req, res) {
   }
 }
 
+// Only the person describing the patient may answer for the scene. The hospital
+// reads the report; it does not get to say whether the patient is breathing.
+function assertMayAnswer(req, caseId, emergencyCase) {
+  const viaCaseToken = req.caseAccess?.caseId === caseId;
+  const isOwnerPatient = req.user?.role === 'patient' && emergencyCase.patient_id === req.user.id;
+  if (!viaCaseToken && !isOwnerPatient) {
+    throw new ClarificationError('Not authorized to answer for this case', 403);
+  }
+}
+
+// GET /api/ai/report/:caseId/clarify — the questions still open.
+//
+// For an app resuming a sequence it was part way through: the phone was locked,
+// the app was killed, the patient switched away to make a call. The case is
+// parked in 'awaiting_clarification' until the questions are closed or the
+// deadline passes, so there is something definite to come back to.
+export async function getClarifications(req, res) {
+  const { caseId } = req.params;
+  try {
+    const report = await clarificationService.loadReportForClarification(caseId);
+    if (!report) return errorResponse(res, 'Report not found', 404);
+    assertMayAnswer(req, caseId, report.emergency_cases);
+
+    const result = await clarificationService.getOpenClarifications(caseId);
+    return successResponse(res, result, 'Open questions', 200);
+  } catch (err) {
+    return errorResponse(res, err.message, err.status || 500);
+  }
+}
+
+// POST /api/ai/report/:caseId/clarify — record one single-tap answer (FR-14).
+//
+// The record has NOT been written yet and the hospital has nothing: that is the
+// point of the blocking sequence. Answering the last question writes the record
+// and delivers it, so this response carries the finished report when it was the
+// final tap.
+export async function answerClarification(req, res) {
+  const { caseId } = req.params;
+  const { questionId, answer } = req.body || {};
+  if (!questionId) return errorResponse(res, 'questionId is required', 400);
+  if (answer === undefined || answer === null || String(answer).trim() === '') {
+    return errorResponse(res, 'answer is required', 400);
+  }
+
+  try {
+    const report = await clarificationService.loadReportForClarification(caseId);
+    if (!report) return errorResponse(res, 'Report not found', 404);
+    assertMayAnswer(req, caseId, report.emergency_cases);
+
+    const result = await clarificationService.answerClarification(caseId, {
+      questionId,
+      answer,
+    });
+    return successResponse(
+      res,
+      result,
+      result.report ? 'Report generated and sent to hospital' : 'Answer recorded',
+      200,
+    );
+  } catch (err) {
+    return errorResponse(res, err.message, err.status || 500);
+  }
+}
+
+// POST /api/ai/report/:caseId/clarify/skip — stop asking and write the report.
+//
+// The deliberate skip, and the thing that bounds how long the blocking sequence
+// can hold a record back. Answers already given still feed the record; the rest
+// stay "Not reported".
+export async function skipClarifications(req, res) {
+  const { caseId } = req.params;
+  try {
+    const report = await clarificationService.loadReportForClarification(caseId);
+    if (!report) return errorResponse(res, 'Report not found', 404);
+    assertMayAnswer(req, caseId, report.emergency_cases);
+
+    const result = await clarificationService.skipClarifications(caseId);
+    return successResponse(res, result, 'Report generated and sent to hospital', 200);
+  } catch (err) {
+    return errorResponse(res, err.message, err.status || 500);
+  }
+}
+
 export default {
   uploadMiddleware,
   generateReport,
   getReport,
   getReportPdf,
   resendReportToHospital,
+  getClarifications,
+  answerClarification,
+  skipClarifications,
 };
