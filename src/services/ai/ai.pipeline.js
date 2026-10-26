@@ -96,7 +96,140 @@ async function saveRow(row, caseId, { select = '*' } = {}) {
 
 // ---------------------------------------------------------------------------
 // Phase 1 — analyse the inputs and compose the questions.
+//
+// The four helpers below are the independent halves of it. Each is awaited
+// together with the others rather than in turn, so the wait is the longest of
+// them instead of their sum. None of them throws: a report is worth having
+// without a photo description or a medical profile, and losing one to the other
+// would be the pipeline failing at exactly the job it exists to do.
 // ---------------------------------------------------------------------------
+
+/// Puts the media in storage. Returns the signed URLs the row needs.
+function startUploads(caseId, { voiceNoteBuffer, voiceNoteMimeType, imageBuffers }) {
+  const jobs = [];
+  let voiceIndex = -1;
+
+  if (voiceNoteBuffer) {
+    voiceIndex = jobs.length;
+    jobs.push(
+      fileUtils.uploadToSupabaseStorage(
+        voiceNoteBuffer,
+        `voice${fileUtils.getExtFromMime(voiceNoteMimeType)}`,
+        voiceNoteMimeType,
+        `cases/${caseId}/voice`,
+      ),
+    );
+  }
+
+  const imageStart = jobs.length;
+  imageBuffers.forEach((img, i) => {
+    jobs.push(
+      fileUtils.uploadToSupabaseStorage(
+        img.buffer,
+        `image-${i}${fileUtils.getExtFromMime(img.mimeType)}`,
+        img.mimeType,
+        `cases/${caseId}/images`,
+      ),
+    );
+  });
+
+  return Promise.allSettled(jobs).then((results) => {
+    results.forEach((r, i) => {
+      if (r.status === 'rejected') logger.warn(`Upload ${i} failed: ${r.reason?.message}`);
+    });
+    return {
+      voiceNoteUrl:
+        voiceIndex >= 0 && results[voiceIndex]?.status === 'fulfilled'
+          ? results[voiceIndex].value.signedUrl
+          : null,
+      imageUrls: results
+        .slice(imageStart)
+        .filter((r) => r.status === 'fulfilled')
+        .map((r) => r.value.signedUrl),
+    };
+  });
+}
+
+/// Blood group, allergies and the rest, when the reporter has an account.
+///
+/// Guarded on patientId because an anonymous reporter has none, and
+/// .eq('user_id', null) is sent as the literal string "null", which Postgres
+/// rejects as a uuid.
+/// Never rejects, for two reasons. A report is worth having without a blood
+/// group, so a failed lookup must not fail the pipeline. And it now runs
+/// alongside transcription under Promise.all: if transcription rejects first,
+/// a rejection arriving here afterwards has nothing left to catch it, and the
+/// unhandledRejection handler in server.js exits the process.
+async function loadMedicalProfile(patientId) {
+  if (!patientId) return null;
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('medical_profiles')
+      .select('*')
+      .eq('user_id', patientId)
+      .maybeSingle();
+    if (error) {
+      logger.warn(`Medical profile lookup failed for ${patientId}: ${error.message}`);
+      return null;
+    }
+    return data || null;
+  } catch (err) {
+    logger.warn(`Medical profile lookup threw for ${patientId}: ${err.message}`);
+    return null;
+  }
+}
+
+/// Speech to text, and the language it was actually in.
+async function transcribe(voiceNoteBuffer, voiceNoteMimeType, inputLanguage) {
+  if (!voiceNoteBuffer) {
+    return {
+      transcribedText: null,
+      detectedLanguage: normaliseLanguage(
+        inputLanguage && inputLanguage !== 'auto' ? inputLanguage : 'en',
+      ),
+    };
+  }
+
+  // The caller's choice goes to the model. It used to be collected in the app
+  // and dropped here, leaving the model to guess — and Urdu and Hindi are the
+  // same language to an ear, differing only in script, so it guessed Hindi and
+  // wrote a live report in Devanagari.
+  const chosen = inputLanguage && inputLanguage !== 'auto' ? inputLanguage : null;
+  const transcription = await whisperService.transcribeWithRetry(
+    voiceNoteBuffer,
+    voiceNoteMimeType,
+    chosen,
+  );
+  const transcribedText = transcription.text;
+
+  // Trust the caller's own choice over the model's guess. Failing that, the
+  // model's answer is a language NAME — "urdu", "english" — and it reaches for
+  // Hindi or Punjabi on Urdu speech, so it is mapped before it goes near a
+  // column that takes four codes and nothing else. gpt-4o-transcribe does not
+  // report a language at all, hence the classifier on the text as a last resort.
+  const detectedLanguage = normaliseLanguage(
+    chosen
+      || transcription.detectedLanguage
+      || (transcribedText ? await whisperService.detectLanguageFromText(transcribedText) : 'en'),
+  );
+
+  logger.info(
+    `Transcribed ${transcription.duration ?? '?'}s audio `
+      + `(asked for ${chosen || 'auto'}, model said "${transcription.detectedLanguage || 'nothing'}")`
+      + ` → ${detectedLanguage}`,
+  );
+
+  return { transcribedText, detectedLanguage };
+}
+
+/// What is medically visible in each photo. Fault-tolerant per image.
+async function describeImages(imageBuffers) {
+  if (!imageBuffers || imageBuffers.length === 0) return [];
+  const results = await Promise.allSettled(
+    imageBuffers.map((img) => gptService.analyzeImage(img.buffer, img.mimeType)),
+  );
+  return results.filter((r) => r.status === 'fulfilled').map((r) => r.value);
+}
 
 /// Runs the analysis and puts the questions. Delivers nothing.
 ///
@@ -127,106 +260,32 @@ export async function analyseForClarification(caseId, patientId, inputs) {
   socketEmit(ROOMS.caseRoom(caseId), 'ai:processing', { caseId });
 
   try {
-    // STEP 3 — upload media in parallel.
-    const uploadPromises = [];
-    let voiceIndex = -1;
-    if (voiceNoteBuffer) {
-      voiceIndex = uploadPromises.length;
-      uploadPromises.push(
-        fileUtils.uploadToSupabaseStorage(
-          voiceNoteBuffer,
-          `voice${fileUtils.getExtFromMime(voiceNoteMimeType)}`,
-          voiceNoteMimeType,
-          `cases/${caseId}/voice`,
-        ),
-      );
-    }
-    const imageStart = uploadPromises.length;
-    imageBuffers.forEach((img, i) => {
-      uploadPromises.push(
-        fileUtils.uploadToSupabaseStorage(
-          img.buffer,
-          `image-${i}${fileUtils.getExtFromMime(img.mimeType)}`,
-          img.mimeType,
-          `cases/${caseId}/images`,
-        ),
-      );
-    });
-
-    const uploadResults = await Promise.allSettled(uploadPromises);
-    uploadResults.forEach((r, i) => {
-      if (r.status === 'rejected') logger.warn(`Upload ${i} failed: ${r.reason?.message}`);
-    });
-    const voiceNoteUrl =
-      voiceIndex >= 0 && uploadResults[voiceIndex]?.status === 'fulfilled'
-        ? uploadResults[voiceIndex].value.signedUrl
-        : null;
-    const imageUrls = uploadResults
-      .slice(imageStart)
-      .filter((r) => r.status === 'fulfilled')
-      .map((r) => r.value.signedUrl);
-
-    // STEP 4 — patient medical profile (optional).
+    // STEPS 3-6 — everything that does not depend on anything else, at once.
     //
-    // Guarded on patientId because an anonymous reporter has none, and
-    // .eq('user_id', null) is sent as the literal string "null", which Postgres
-    // rejects as a uuid. The error was swallowed and the profile came back
-    // empty, so the only symptom was a line in the database log on every single
-    // anonymous case.
-    const { data: medicalProfile } = patientId
-      ? await supabaseAdmin
-          .from('medical_profiles')
-          .select('*')
-          .eq('user_id', patientId)
-          .maybeSingle()
-      : { data: null };
+    // These used to run one after another: upload, then profile, then
+    // transcribe, then look at the photo. Nothing required that order. Storage
+    // uploads are only needed for the row written at the end, and the speech
+    // and vision models never see the uploaded copies — they are handed the
+    // buffers that are already in memory. So the wait was the sum of four
+    // independent calls when it only ever had to be the longest of them, and
+    // the person holding the phone was watching a progress screen for it.
+    const uploads = startUploads(caseId, {
+      voiceNoteBuffer,
+      voiceNoteMimeType,
+      imageBuffers,
+    });
+    const profilePromise = loadMedicalProfile(patientId);
+    const transcriptionPromise = transcribe(voiceNoteBuffer, voiceNoteMimeType, inputLanguage);
+    const visionPromise = describeImages(imageBuffers);
 
-    // STEP 5 — transcribe voice note.
-    let transcribedText = null;
-    let detectedLanguage = inputLanguage === 'auto' ? null : inputLanguage;
-    if (voiceNoteBuffer) {
-      // The caller's choice goes to the model. It used to be collected in the
-      // app and dropped here, leaving the model to guess — and Urdu and Hindi
-      // are the same language to an ear, differing only in script, so it
-      // guessed Hindi and wrote a live report in Devanagari.
-      const chosen = inputLanguage && inputLanguage !== 'auto' ? inputLanguage : null;
-      const transcription = await whisperService.transcribeWithRetry(
-        voiceNoteBuffer,
-        voiceNoteMimeType,
-        chosen,
-      );
-      transcribedText = transcription.text;
-      // Trust the caller's own choice over the model's guess. Failing that,
-      // the model's answer is a language NAME — "urdu", "english" — and it
-      // reaches for Hindi or Punjabi on Urdu speech, so it is mapped before it
-      // goes near a column that takes four codes and nothing else.
-      // gpt-4o-transcribe does not report a language at all, hence the
-      // classifier on the text as the last resort.
-      detectedLanguage = normaliseLanguage(
-        chosen
-          || transcription.detectedLanguage
-          || (transcribedText ? await whisperService.detectLanguageFromText(transcribedText) : 'en'),
-      );
-      logger.info(
-        `Transcribed ${transcription.duration ?? '?'}s audio `
-          + `(asked for ${chosen || 'auto'}, model said "${transcription.detectedLanguage || 'nothing'}")`
-          + ` → ${detectedLanguage}`,
-      );
-    } else {
-      detectedLanguage = normaliseLanguage(detectedLanguage || 'en');
-    }
-
-    // STEP 6 — analyze images (parallel, fault-tolerant).
-    let imageDescriptions = [];
-    if (imageBuffers.length > 0) {
-      const results = await Promise.allSettled(
-        imageBuffers.map((img) => gptService.analyzeImage(img.buffer, img.mimeType)),
-      );
-      imageDescriptions = results.filter((r) => r.status === 'fulfilled').map((r) => r.value);
-    }
+    const [{ transcribedText, detectedLanguage }, imageDescriptions, medicalProfile] =
+      await Promise.all([transcriptionPromise, visionPromise, profilePromise]);
 
     // STEP 7 — compose the questions. Never throws: no questions simply means
     // the record is written from the description alone.
+    //
+    // The one call that genuinely has to wait, because it is the one that needs
+    // to know what was said and what the photo showed.
     const clarifications = await gptService.generateClarificationQuestions({
       transcribedText,
       userText,
@@ -234,6 +293,11 @@ export async function analyseForClarification(caseId, patientId, inputs) {
       medicalProfile,
       detectedLanguage: detectedLanguage || 'en',
     });
+
+    // Awaited only now, at the point the row is about to be written. By here
+    // they have had the whole of transcription and the question call to finish.
+    const { voiceNoteUrl, imageUrls } = await uploads;
+
     const awaiting = clarifications.length > 0;
 
     // STEP 8 — persist the analysis, so phase 2 does not re-transcribe or

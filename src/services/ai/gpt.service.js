@@ -14,6 +14,16 @@ const MODEL =
     ? process.env.OPENAI_MODEL_PRODUCTION || 'gpt-4o'
     : process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
+/// The questions are composed on a smaller model than the record.
+///
+/// Naming what a description failed to mention is a much easier job than
+/// writing a clinical record from it, and it is the one call the person holding
+/// the phone is actually waiting on — the record is generated after they have
+/// finished answering. Spending gpt-4o's latency here buys very little and
+/// costs it at the worst moment. Override with OPENAI_MODEL_QUESTIONS if the
+/// questions ever come back weak.
+const QUESTION_MODEL = process.env.OPENAI_MODEL_QUESTIONS || 'gpt-4o-mini';
+
 // Describes a single injury/scene image via GPT-4o vision. Never throws — a bad
 // image must not sink the whole report.
 export async function analyzeImage(imageBuffer, mimeType) {
@@ -53,7 +63,7 @@ export async function generateClarificationQuestions(inputs) {
   try {
     const startTime = Date.now();
     const response = await openai.chat.completions.create({
-      model: MODEL,
+      model: QUESTION_MODEL,
       // Questions only — a fraction of a report.
       max_tokens: 500,
       temperature: 0.2,
@@ -68,7 +78,8 @@ export async function generateClarificationQuestions(inputs) {
     const parsed = JSON.parse(raw);
     const questions = buildClarifications(parsed.clarification_questions);
     logger.info(
-      `Composed ${questions.length} clarification question(s) in ${Date.now() - startTime}ms`,
+      `Composed ${questions.length} clarification question(s) in ${Date.now() - startTime}ms `
+        + `on ${QUESTION_MODEL}`,
     );
     return questions;
   } catch (error) {

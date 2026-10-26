@@ -17,19 +17,22 @@ import logger from '../../middleware/logger.js';
 import { generateFinalReport } from './ai.pipeline.js';
 import notifier from '../whatsapp/notifier.js';
 
-/// How long the questions may hold the record back, per channel.
+/// How long the sequence may go QUIET before the record is written anyway.
 ///
-/// In the app a question is a tap on a full-screen button: four of them take
-/// well under a minute, even badly, even one-handed. Ninety seconds is generous
-/// enough that nobody answering in good faith is cut off.
+/// This is an inactivity timeout, not a total budget, and the distinction is
+/// the whole point. The first version measured from the moment the questions
+/// were put, which cut people off mid-sequence for the crime of reading: a
+/// ninety-second allowance for three questions sounds generous until someone
+/// spends forty seconds on the first one. Every tap now restarts the clock, so
+/// a person who is engaged is never cut off, however long they take, while a
+/// phone that has genuinely stopped is still detected promptly.
 ///
-/// WhatsApp is not that. Every question is a round trip through Meta's
-/// infrastructure, the reply has to be read and typed, and the keyboard may be
-/// in the wrong script. Holding WhatsApp to the app's deadline would time out
-/// people who were answering properly — so it gets four minutes. Still bounded,
-/// and still a fraction of a ten to twenty minute ambulance journey.
-export const CLARIFICATION_DEADLINE_MS = 90 * 1000;
-export const WHATSAPP_DEADLINE_MS = 240 * 1000;
+/// Three minutes of silence in the app. WhatsApp gets five: every question is a
+/// round trip through Meta, the reply has to be read and typed, and the
+/// keyboard may be in the wrong script. Both are bounded, and both are a
+/// fraction of a ten to twenty minute ambulance journey.
+export const CLARIFICATION_DEADLINE_MS = 180 * 1000;
+export const WHATSAPP_DEADLINE_MS = 300 * 1000;
 
 function deadlineFor(channel) {
   return channel === 'whatsapp' ? WHATSAPP_DEADLINE_MS : CLARIFICATION_DEADLINE_MS;
@@ -38,6 +41,24 @@ function deadlineFor(channel) {
 /// The shortest deadline, so one query can find every candidate and the
 /// per-channel comparison can be made per row.
 const SHORTEST_DEADLINE_MS = Math.min(CLARIFICATION_DEADLINE_MS, WHATSAPP_DEADLINE_MS);
+
+/// The last sign that someone is still there: the questions being put, or the
+/// most recent answer, whichever is later.
+///
+/// Read off the answers themselves rather than tracked in a column of its own,
+/// so it cannot drift out of step with them — and so clarifications_asked_at
+/// keeps meaning what the Chapter 5 measurement needs it to mean: when the
+/// sequence started, not when it was last touched.
+function lastActivityAt(row) {
+  const stamps = [Date.parse(row.clarifications_asked_at)];
+  for (const c of Array.isArray(row.clarifications) ? row.clarifications : []) {
+    if (c?.answered_at) stamps.push(Date.parse(c.answered_at));
+  }
+  const valid = stamps.filter(Number.isFinite);
+  // No usable timestamp at all: treat it as long overdue rather than letting it
+  // sit in 'awaiting_clarification' forever with the hospital waiting.
+  return valid.length ? Math.max(...valid) : 0;
+}
 
 /// Generates the records for every sequence that ran out of time.
 ///
@@ -58,12 +79,13 @@ export async function reapAbandonedClarifications() {
   }
   if (!candidates || candidates.length === 0) return { generated: 0, failed: 0 };
 
-  // The query found everything past the shortest deadline; each row is now
-  // measured against its own channel's.
+  // The query found everything whose questions were put longer ago than the
+  // shortest deadline, which is a safe lower bound because nothing can have
+  // been answered before it was asked. Each row is now measured properly: its
+  // own channel's deadline, against its own last sign of life.
   const stalled = candidates.filter((row) => {
-    const asked = new Date(row.clarifications_asked_at).getTime();
-    if (!Number.isFinite(asked)) return true; // no timestamp — it has waited long enough
-    return Date.now() - asked >= deadlineFor(row.emergency_cases?.channel);
+    const quietFor = Date.now() - lastActivityAt(row);
+    return quietFor >= deadlineFor(row.emergency_cases?.channel);
   });
   if (stalled.length === 0) return { generated: 0, failed: 0 };
 
@@ -92,7 +114,7 @@ export async function reapAbandonedClarifications() {
     const answered = clarifications.filter((c) => c?.answer).length;
     const channel = row.emergency_cases?.channel;
     logger.warn(
-      `Clarification sequence for case ${row.case_id} timed out after `
+      `Clarification sequence for case ${row.case_id} went quiet for `
         + `${Math.round(deadlineFor(channel) / 1000)}s (${channel || 'app'}) with ${answered} of `
         + `${clarifications.length} answered — generating the record without the rest.`,
     );
