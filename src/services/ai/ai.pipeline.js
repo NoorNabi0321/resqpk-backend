@@ -167,11 +167,19 @@ export async function analyseForClarification(caseId, patientId, inputs) {
       .map((r) => r.value.signedUrl);
 
     // STEP 4 — patient medical profile (optional).
-    const { data: medicalProfile } = await supabaseAdmin
-      .from('medical_profiles')
-      .select('*')
-      .eq('user_id', patientId)
-      .maybeSingle();
+    //
+    // Guarded on patientId because an anonymous reporter has none, and
+    // .eq('user_id', null) is sent as the literal string "null", which Postgres
+    // rejects as a uuid. The error was swallowed and the profile came back
+    // empty, so the only symptom was a line in the database log on every single
+    // anonymous case.
+    const { data: medicalProfile } = patientId
+      ? await supabaseAdmin
+          .from('medical_profiles')
+          .select('*')
+          .eq('user_id', patientId)
+          .maybeSingle()
+      : { data: null };
 
     // STEP 5 — transcribe voice note.
     let transcribedText = null;
@@ -232,27 +240,38 @@ export async function analyseForClarification(caseId, patientId, inputs) {
     // re-run vision after the answers come in. No clinical fields are written
     // here: there is no record yet, and a half-filled row is exactly the
     // provisional artefact this design exists to avoid.
-    const { data: saved, error: saveError } = await saveRow(
-      {
-        case_id: caseId,
-        patient_id: patientId,
-        voice_note_url: voiceNoteUrl || null,
-        input_text: userText || null,
-        image_urls: imageUrls,
-        image_descriptions: imageDescriptions,
-        input_language: detectedLanguage || 'en',
-        transcribed_text: transcribedText,
-        medical_profile_snapshot: medicalProfile || null,
-        clarifications,
-        clarification_state: awaiting ? 'awaiting' : 'none',
-        clarifications_asked_at: awaiting ? new Date().toISOString() : null,
-        generation_status: awaiting ? 'awaiting_clarification' : 'processing',
-      },
-      caseId,
-    );
+    const analysisRow = {
+      case_id: caseId,
+      patient_id: patientId,
+      voice_note_url: voiceNoteUrl || null,
+      input_text: userText || null,
+      image_urls: imageUrls,
+      image_descriptions: imageDescriptions,
+      input_language: detectedLanguage || 'en',
+      transcribed_text: transcribedText,
+      medical_profile_snapshot: medicalProfile || null,
+      clarifications,
+      clarification_state: awaiting ? 'awaiting' : 'none',
+      clarifications_asked_at: awaiting ? new Date().toISOString() : null,
+      generation_status: awaiting ? 'awaiting_clarification' : 'processing',
+    };
+
+    const { data: saved, error: saveError } = await saveRow(analysisRow, caseId);
     if (saveError) {
-      logger.error(`Saving the analysis failed for case ${caseId}: ${saveError.message}`);
-      throw new Error('The report could not be started. Please try again.');
+      // The questions are an improvement on the record, never a precondition
+      // for it, and by this point the audio has been uploaded, transcribed and
+      // analysed. Throwing here would discard all of that over a row that could
+      // not be written — exactly the loss this pipeline exists to prevent.
+      //
+      // So the questions are given up and the record is generated straight from
+      // what is already in memory. Phase 2 writes a different, smaller set of
+      // columns, so it may well succeed where this failed; if it does not, it
+      // fails loudly on its own and the reporter is told.
+      logger.error(
+        `Saving the analysis failed for case ${caseId}, generating without questions: `
+          + `${saveError.message}`,
+      );
+      return { awaitingClarification: false, clarifications: [], analysis: analysisRow };
     }
 
     // Questions that were not stored must not be put: answering one would write
