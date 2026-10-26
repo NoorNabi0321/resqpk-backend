@@ -326,6 +326,28 @@ export async function skipClarifications(req, res) {
   }
 }
 
+// POST /api/ai/report/:caseId/clarify/submit — every answer at once (FR-14).
+//
+// How the app finishes a sequence: the taps are buffered on the phone and sent
+// together, so the deadline cannot close a sequence between two of them and
+// start rejecting answers from someone who is visibly still answering. An empty
+// list is the skip, and a legitimate ending.
+export async function submitClarifications(req, res) {
+  const { caseId } = req.params;
+  const answers = Array.isArray(req.body?.answers) ? req.body.answers : [];
+
+  try {
+    const report = await clarificationService.loadReportForClarification(caseId);
+    if (!report) return errorResponse(res, 'Report not found', 404);
+    assertMayAnswer(req, caseId, report.emergency_cases);
+
+    const result = await clarificationService.submitClarifications(caseId, answers);
+    return successResponse(res, result, 'Report generated and sent to hospital', 200);
+  } catch (err) {
+    return errorResponse(res, err.message, err.status || 500);
+  }
+}
+
 export default {
   uploadMiddleware,
   generateReport,
@@ -335,4 +357,5 @@ export default {
   getClarifications,
   answerClarification,
   skipClarifications,
+  submitClarifications,
 };

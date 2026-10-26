@@ -167,6 +167,7 @@ export function buildClarificationPrompt(inputs) {
     transcribedText = null,
     userText = null,
     imageDescriptions = [],
+    photoAttached = false,
     medicalProfile = null,
     detectedLanguage = 'en',
   } = inputs || {};
@@ -177,9 +178,17 @@ export function buildClarificationPrompt(inputs) {
 
   const textBlock = userText ? `TEXT INPUT:\n"${userText}"` : 'TEXT INPUT: Not provided';
 
-  const imageBlock =
-    imageDescriptions.length > 0
-      ? `IMAGE ANALYSIS:\n${imageDescriptions.map((d, i) => `Image ${i + 1}: ${d}`).join('\n')}`
+  // A photo is usually still being analysed when the questions are composed —
+  // describing it takes a vision call of its own, and the questions do not wait
+  // for it. Saying so matters: without it the model reads "no images" and asks
+  // about things the photograph already answers.
+  const imageBlock = imageDescriptions.length > 0
+    ? `IMAGE ANALYSIS:\n${imageDescriptions.map((d, i) => `Image ${i + 1}: ${d}`).join('\n')}`
+    : photoAttached
+      ? 'PHOTOGRAPH: One was taken at the scene and goes to the hospital with the '
+        + 'report, but it has not been analysed yet. Do not ask about anything a '
+        + 'photograph of the patient would answer by itself — visible wounds, '
+        + 'blood, position, obvious deformity.'
       : 'IMAGES: Not provided';
 
   const profileBlock = medicalProfile
@@ -247,7 +256,8 @@ Respond with ONLY this JSON object (no other text):
 }
 
 options_local must have exactly the same number of entries as options, in the
-same order, because the person answers by position.`;
+same order, because the person answers by position. Omit both _local fields
+entirely where the instruction above says to — do not repeat the English.`;
 }
 
 /// What to do about the language the questions are shown in.
@@ -270,8 +280,12 @@ formal English.`;
       return `The person describing the patient is speaking Sindhi. Give question_local and
 options_local in Urdu script, which they will be able to read.`;
     default:
-      return `The person describing the patient is writing English. Repeat the English
-question and options in question_local and options_local unchanged.`;
+      // Omitted rather than duplicated. Repeating every question and option
+      // verbatim doubled the response for English reporters, and output length
+      // is most of the latency on the one call someone is waiting through.
+      return `The person describing the patient is writing English, so the English
+question and options are already what they will read. OMIT question_local and
+options_local entirely — do not repeat the English into them.`;
   }
 }
 

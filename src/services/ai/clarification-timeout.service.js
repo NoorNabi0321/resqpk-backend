@@ -31,7 +31,7 @@ import notifier from '../whatsapp/notifier.js';
 /// round trip through Meta, the reply has to be read and typed, and the
 /// keyboard may be in the wrong script. Both are bounded, and both are a
 /// fraction of a ten to twenty minute ambulance journey.
-export const CLARIFICATION_DEADLINE_MS = 180 * 1000;
+export const CLARIFICATION_DEADLINE_MS = 300 * 1000;
 export const WHATSAPP_DEADLINE_MS = 300 * 1000;
 
 function deadlineFor(channel) {
@@ -51,6 +51,11 @@ const SHORTEST_DEADLINE_MS = Math.min(CLARIFICATION_DEADLINE_MS, WHATSAPP_DEADLI
 /// sequence started, not when it was last touched.
 function lastActivityAt(row) {
   const stamps = [Date.parse(row.clarifications_asked_at)];
+  // The app buffers its answers and sends them in one go, so between the
+  // questions appearing and the sequence ending the only thing that reaches the
+  // server is this ping. Without it, someone reading carefully is
+  // indistinguishable from a phone that has stopped.
+  if (row.clarifications_last_seen_at) stamps.push(Date.parse(row.clarifications_last_seen_at));
   for (const c of Array.isArray(row.clarifications) ? row.clarifications : []) {
     if (c?.answered_at) stamps.push(Date.parse(c.answered_at));
   }
@@ -69,7 +74,10 @@ export async function reapAbandonedClarifications() {
 
   const { data: candidates, error } = await supabaseAdmin
     .from('ai_reports')
-    .select('case_id, clarifications, clarifications_asked_at, emergency_cases!inner(channel)')
+    .select(
+      'case_id, clarifications, clarifications_asked_at, clarifications_last_seen_at, '
+        + 'emergency_cases!inner(channel)',
+    )
     .eq('generation_status', 'awaiting_clarification')
     .lt('clarifications_asked_at', cutoff);
 

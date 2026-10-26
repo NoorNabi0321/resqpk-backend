@@ -15,7 +15,20 @@ import { clarificationStateFor } from './clarification.js';
 import { generateFinalReport } from './ai.pipeline.js';
 
 const REPORT_COLUMNS = `id, case_id, patient_id, clarifications, clarification_state,
-   generation_status, clarifications_asked_at`;
+   generation_status, clarifications_asked_at, clarifications_last_seen_at`;
+
+/// Matches one submitted answer against the options its question offered.
+///
+/// Case-insensitive, because what comes back is the option text and a client
+/// could reasonably normalise it. Nothing else is accepted: the sequence is a
+/// closed set of choices by design, and free text arriving here is a client bug
+/// or someone poking the endpoint — either way it is not something to put in
+/// front of a model that is about to write a clinical record.
+function matchOption(question, answer) {
+  return (question?.options || []).find(
+    (opt) => String(opt).toLowerCase() === String(answer ?? '').trim().toLowerCase(),
+  );
+}
 
 export class ClarificationError extends Error {
   constructor(message, status = 400) {
@@ -35,15 +48,113 @@ export async function loadReportForClarification(caseId) {
 }
 
 /// The questions still open on this case, for an app resuming the sequence.
+///
+/// Doubles as the liveness ping. Reading the questions is proof that something
+/// is still showing them, which is precisely what the deadline is trying to
+/// detect the absence of — so the read records it rather than making the client
+/// call a second endpoint to say the same thing.
 export async function getOpenClarifications(caseId) {
   const row = await loadReportForClarification(caseId);
   if (!row) throw new ClarificationError('Report not found', 404);
   const clarifications = Array.isArray(row.clarifications) ? row.clarifications : [];
+
+  if (row.generation_status === 'awaiting_clarification') {
+    await touchLastSeen(row.id);
+  }
+
   return {
     generationStatus: row.generation_status,
     clarificationState: clarificationStateFor(clarifications),
     clarifications,
   };
+}
+
+/// Records that the client is still there. Best-effort: a failed ping must
+/// never fail the read it rode in on.
+async function touchLastSeen(reportId) {
+  const { error } = await supabaseAdmin
+    .from('ai_reports')
+    .update({ clarifications_last_seen_at: new Date().toISOString() })
+    .eq('id', reportId)
+    .eq('generation_status', 'awaiting_clarification');
+  if (error) logger.warn(`Clarification keepalive failed for ${reportId}: ${error.message}`);
+}
+
+/// Every answer at once, then the record.
+///
+/// This is how the app finishes a sequence, and it replaces a round trip per
+/// tap. Buffering the answers on the phone and sending them together is not
+/// just fewer requests: it removes the window in which the deadline could close
+/// a sequence between two taps and start rejecting answers from someone who was
+/// visibly in the middle of giving them.
+///
+/// `answers` may be empty — that is the skip, and it is a legitimate ending.
+/// Anything not answered is marked skipped, and the record is generated from
+/// the description plus whatever did arrive.
+export async function submitClarifications(caseId, answers = []) {
+  const row = await loadReportForClarification(caseId);
+  if (!row) throw new ClarificationError('Report not found', 404);
+
+  if (row.generation_status === 'completed') {
+    // The deadline got there first and the record exists. Not an error anyone
+    // can act on: the caller wanted a report and there is one.
+    return { clarificationState: row.clarification_state, alreadyWritten: true, report: null };
+  }
+  if (row.generation_status !== 'awaiting_clarification') {
+    throw new ClarificationError('The report is already being written', 409);
+  }
+
+  const clarifications = Array.isArray(row.clarifications) ? row.clarifications : [];
+  const byId = new Map(
+    (Array.isArray(answers) ? answers : [])
+      .filter((a) => a && a.questionId)
+      .map((a) => [String(a.questionId), a.answer]),
+  );
+
+  const now = new Date().toISOString();
+  let accepted = 0;
+  const closed = clarifications.map((q) => {
+    if (q?.answer) return q; // already recorded, e.g. by the single-answer route
+    const chosen = byId.has(q?.id) ? matchOption(q, byId.get(q.id)) : undefined;
+    if (chosen) {
+      accepted += 1;
+      return { ...q, answer: chosen, answered_at: now };
+    }
+    // Not answered, or answered with something that was never offered. Either
+    // way it goes into the record as unanswered rather than as a guess.
+    if (byId.has(q?.id)) {
+      logger.warn(`Case ${caseId}: discarded an answer not among the options for ${q?.id}`);
+    }
+    return { ...q, skipped_at: q?.skipped_at || now };
+  });
+
+  const state = clarificationStateFor(closed);
+
+  const { data: updated, error } = await supabaseAdmin
+    .from('ai_reports')
+    .update({ clarifications: closed, clarification_state: state })
+    .eq('id', row.id)
+    .eq('generation_status', 'awaiting_clarification')
+    .select(REPORT_COLUMNS)
+    .maybeSingle();
+
+  if (error) {
+    logger.error(`Saving clarification answers for case ${caseId} failed: ${error.message}`);
+    throw new ClarificationError('The answers could not be saved. Please try again.', 500);
+  }
+  if (!updated) {
+    // The sweep claimed the row between the read and the write. The record is
+    // being generated from the description; nothing is lost that was not
+    // already going to be.
+    throw new ClarificationError('The report is already being written', 409);
+  }
+
+  logger.info(
+    `Case ${caseId}: ${accepted} of ${clarifications.length} answered — generating.`,
+  );
+
+  const report = await generateFinalReport(caseId);
+  return { clarificationState: state, clarifications: closed, alreadyWritten: false, report };
 }
 
 /// Records one single-tap answer.

@@ -278,25 +278,35 @@ export async function analyseForClarification(caseId, patientId, inputs) {
     const transcriptionPromise = transcribe(voiceNoteBuffer, voiceNoteMimeType, inputLanguage);
     const visionPromise = describeImages(imageBuffers);
 
-    const [{ transcribedText, detectedLanguage }, imageDescriptions, medicalProfile] =
-      await Promise.all([transcriptionPromise, visionPromise, profilePromise]);
+    const [{ transcribedText, detectedLanguage }, medicalProfile] = await Promise.all([
+      transcriptionPromise,
+      profilePromise,
+    ]);
 
     // STEP 7 — compose the questions. Never throws: no questions simply means
     // the record is written from the description alone.
     //
-    // The one call that genuinely has to wait, because it is the one that needs
-    // to know what was said and what the photo showed.
+    // Deliberately NOT waiting on the photo. Describing an image is a second
+    // vision call of its own, and making the questions wait for it put three
+    // seconds on the only part of this flow a person actually watches — while
+    // buying very little, because the questions are about what the *spoken*
+    // description failed to settle. The description is what they are derived
+    // from; the photo goes to the record.
+    //
+    // Vision keeps running underneath and is collected below, by which time it
+    // has had transcription and this call to finish, so it costs nothing.
     const clarifications = await gptService.generateClarificationQuestions({
       transcribedText,
       userText,
-      imageDescriptions,
       medicalProfile,
       detectedLanguage: detectedLanguage || 'en',
     });
 
-    // Awaited only now, at the point the row is about to be written. By here
-    // they have had the whole of transcription and the question call to finish.
-    const { voiceNoteUrl, imageUrls } = await uploads;
+    // Collected now, at the point the row is about to be written.
+    const [imageDescriptions, { voiceNoteUrl, imageUrls }] = await Promise.all([
+      visionPromise,
+      uploads,
+    ]);
 
     const awaiting = clarifications.length > 0;
 

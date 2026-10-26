@@ -10,6 +10,7 @@ import {
   getClarifications,
   answerClarification,
   skipClarifications,
+  submitClarifications,
 } from '../controllers/ai.controller.js';
 
 const router = express.Router();
@@ -27,6 +28,7 @@ router.post('/report/:caseId/send', caseAuth, resendReportToHospital);
 // Blocking clarification: the questions put before the record is written. One
 // single-tap answer at a time; the last answer, or a skip, writes the record
 // and delivers it. Declared before :caseId for the same reason /pdf is.
+router.post('/report/:caseId/clarify/submit', caseAuth, submitClarifications);
 router.post('/report/:caseId/clarify/skip', caseAuth, skipClarifications);
 router.get('/report/:caseId/clarify', caseAuth, getClarifications);
 router.post('/report/:caseId/clarify', caseAuth, answerClarification);
